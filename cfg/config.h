@@ -20,6 +20,8 @@
 #define CONFIG_TIP_DEBOUNCE_TIME 100      //!< Amount of time to wait after a tip has been inserted (in milliseconds).
 #define CONFIG_TIP_READ_PERIOD 35         //!< Period at which the temperature should be read (in milliseconds).
 #define CONFIG_TIP_READ_TIMEOUT 2000      //!< Maximum time after which no valid temperature readins will lead to considering the tip is disconnected (in milliseconds).
+#define CONFIG_TIP_SOFT_START_DURATION 0    //!< Default duration of the soft-start current ramp (in milliseconds).
+#define CONFIG_TIP_CURRENT_LIMIT_FACTOR 1.0f //!< Default factor applied to negotiated USB current limits.
 #define CONFIG_TIP_SHUNT_MILLIOHMS 16.0f  //!< Actual shunt resistor value used on the INA219 current-sense path (16 mΩ).
 
 /* User interface config */

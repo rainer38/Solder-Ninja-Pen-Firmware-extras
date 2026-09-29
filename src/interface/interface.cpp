@@ -50,6 +50,10 @@ static enum {
     STATE_MENU_DISPLAY_BRIGHTNESS_1,
     STATE_MENU_ACCELEROMETER_IDLE_TIME_0,
     STATE_MENU_ACCELEROMETER_IDLE_TIME_1,
+    STATE_MENU_TIP_CURRENT_LIMIT_0,
+    STATE_MENU_TIP_CURRENT_LIMIT_1,
+    STATE_MENU_TIP_SOFT_START_0,
+    STATE_MENU_TIP_SOFT_START_1,
     STATE_MENU_UPDATE_0,
 } m_sm;
 static float m_heating_current_display_samples[CONFIG_UI_HEATING_CURRENT_AVERAGE_SAMPLE_COUNT];
@@ -1003,7 +1007,7 @@ int interface_task(void) {
                     break;
                 }
                 case BUTTONS_EVENT_RIGHT_SHORT: {
-                    m_sm = STATE_MENU_UPDATE_0;
+                    m_sm = STATE_MENU_TIP_CURRENT_LIMIT_0;
                     break;
                 }
                 case BUTTONS_EVENT_BOTH_SHORT: {
@@ -1091,6 +1095,173 @@ int interface_task(void) {
             break;
         }
 
+        case STATE_MENU_TIP_CURRENT_LIMIT_0: {
+
+            /* Display menu page */
+            m_library.clear();
+            m_library.drawBitmap(0, 0, k_icon_settings.data, k_icon_settings.width, k_icon_settings.height, 1);
+            m_library.setTextSize(1);
+            m_library.setCursor(20, 0);
+            m_library.print("Settings");
+            m_library.setCursor(20, 9);
+            m_library.print("Current limit");
+            m_library.display();
+
+            /* Handle buttons */
+            switch (buttons_event_get()) {
+                case BUTTONS_EVENT_LEFT_SHORT: {
+                    m_sm = STATE_MENU_ACCELEROMETER_IDLE_TIME_0;
+                    break;
+                }
+                case BUTTONS_EVENT_RIGHT_SHORT: {
+                    m_sm = STATE_MENU_TIP_SOFT_START_0;
+                    break;
+                }
+                case BUTTONS_EVENT_BOTH_SHORT: {
+                    m_sm = STATE_MENU_TIP_CURRENT_LIMIT_1;
+                    break;
+                }
+                case BUTTONS_EVENT_BOTH_LONG: {
+                    m_sm = STATE_MONITOR_REDIRECT;
+                    break;
+                }
+                default: {
+                    break;
+                }
+            }
+            break;
+        }
+
+        case STATE_MENU_TIP_CURRENT_LIMIT_1: {
+
+            float factor = CONFIG_TIP_CURRENT_LIMIT_FACTOR;
+            settings_heating_current_limit_factor_get(factor);
+            int factor_percent = (int)(factor * 100.0f + 0.5f);
+
+            /* Display menu page */
+            m_library.clear();
+            m_library.drawBitmap(0, 0, k_icon_settings.data, k_icon_settings.width, k_icon_settings.height, 1);
+            m_library.setTextSize(1);
+            m_library.setCursor(20, 0);
+            m_library.print("Current limit");
+            m_library.setCursor(20, 9);
+            m_library.printf("%3d%%", factor_percent);
+            m_library.display();
+
+            /* Handle buttons */
+            switch (buttons_event_get()) {
+                case BUTTONS_EVENT_LEFT_SHORT: {
+                    int factor_tenths = (int)(factor * 10.0f + 0.5f);
+                    if (factor_tenths > 1) {
+                        factor_tenths--;
+                        settings_heating_current_limit_factor_set(factor_tenths / 10.0f);
+                    }
+                    break;
+                }
+                case BUTTONS_EVENT_RIGHT_SHORT: {
+                    int factor_tenths = (int)(factor * 10.0f + 0.5f);
+                    if (factor_tenths < 10) {
+                        factor_tenths++;
+                        settings_heating_current_limit_factor_set(factor_tenths / 10.0f);
+                    }
+                    break;
+                }
+                case BUTTONS_EVENT_BOTH_SHORT: {
+                    m_sm = STATE_MENU_TIP_CURRENT_LIMIT_0;
+                    break;
+                }
+                case BUTTONS_EVENT_BOTH_LONG: {
+                    m_sm = STATE_MONITOR_REDIRECT;
+                    break;
+                }
+                default: {
+                    break;
+                }
+            }
+            break;
+        }
+
+        case STATE_MENU_TIP_SOFT_START_0: {
+
+            /* Display menu page */
+            m_library.clear();
+            m_library.drawBitmap(0, 0, k_icon_settings.data, k_icon_settings.width, k_icon_settings.height, 1);
+            m_library.setTextSize(1);
+            m_library.setCursor(20, 0);
+            m_library.print("Settings");
+            m_library.setCursor(20, 9);
+            m_library.print("Soft start");
+            m_library.display();
+
+            /* Handle buttons */
+            switch (buttons_event_get()) {
+                case BUTTONS_EVENT_LEFT_SHORT: {
+                    m_sm = STATE_MENU_TIP_CURRENT_LIMIT_0;
+                    break;
+                }
+                case BUTTONS_EVENT_RIGHT_SHORT: {
+                    m_sm = STATE_MENU_UPDATE_0;
+                    break;
+                }
+                case BUTTONS_EVENT_BOTH_SHORT: {
+                    m_sm = STATE_MENU_TIP_SOFT_START_1;
+                    break;
+                }
+                case BUTTONS_EVENT_BOTH_LONG: {
+                    m_sm = STATE_MONITOR_REDIRECT;
+                    break;
+                }
+                default: {
+                    break;
+                }
+            }
+            break;
+        }
+
+        case STATE_MENU_TIP_SOFT_START_1: {
+
+            uint32_t duration_ms = CONFIG_TIP_SOFT_START_DURATION;
+            settings_heating_soft_start_duration_get(duration_ms);
+
+            /* Display menu page */
+            m_library.clear();
+            m_library.drawBitmap(0, 0, k_icon_settings.data, k_icon_settings.width, k_icon_settings.height, 1);
+            m_library.setTextSize(1);
+            m_library.setCursor(20, 0);
+            m_library.print("Soft start");
+            m_library.setCursor(20, 9);
+            m_library.printf("%lu ms", (unsigned long)duration_ms);
+            m_library.display();
+
+            /* Handle buttons */
+            switch (buttons_event_get()) {
+                case BUTTONS_EVENT_LEFT_SHORT: {
+                    if (duration_ms >= 100) {
+                        settings_heating_soft_start_duration_set(duration_ms - 100);
+                    }
+                    break;
+                }
+                case BUTTONS_EVENT_RIGHT_SHORT: {
+                    if (duration_ms <= 900) {
+                        settings_heating_soft_start_duration_set(duration_ms + 100);
+                    }
+                    break;
+                }
+                case BUTTONS_EVENT_BOTH_SHORT: {
+                    m_sm = STATE_MENU_TIP_SOFT_START_0;
+                    break;
+                }
+                case BUTTONS_EVENT_BOTH_LONG: {
+                    m_sm = STATE_MONITOR_REDIRECT;
+                    break;
+                }
+                default: {
+                    break;
+                }
+            }
+            break;
+        }
+
         case STATE_MENU_UPDATE_0: {
 
             /* Display menu page */
@@ -1106,7 +1277,7 @@ int interface_task(void) {
             /* Handle buttons */
             switch (buttons_event_get()) {
                 case BUTTONS_EVENT_LEFT_SHORT: {
-                    m_sm = STATE_MENU_ACCELEROMETER_IDLE_TIME_0;
+                    m_sm = STATE_MENU_TIP_SOFT_START_0;
                     break;
                 }
                 case BUTTONS_EVENT_RIGHT_SHORT: {
