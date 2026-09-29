@@ -5,6 +5,7 @@
 #include "errors/errors.h"
 #include "log/log.h"
 #include "power/power.h"
+#include "settings/settings.h"
 
 /* Arduino libraries */
 #include <Arduino.h>
@@ -43,6 +44,28 @@ static uint32_t m_timestamp_temperature_read;
 static uint32_t m_timestamp_pid_computed;
 static uint32_t m_heating_duration;
 static float m_cycle_current_limit_a;
+static uint32_t m_timestamp_heating_start;
+
+/**
+ * @brief Computes the soft-started current limit for the current heating pulse.
+ *
+ * Ramps linearly from zero up to the full negotiated limit over
+ * CONFIG_TIP_SOFT_START_DURATION, to avoid an inrush current
+ * spike when heating (re)starts.
+ *
+ * @param[in] current_limit_a Fully negotiated current limit in amperes
+ * @return Ramped current limit in amperes
+ */
+static float m_soft_start_current_limit_get(const float current_limit_a) {
+    uint32_t elapsed = millis() - m_timestamp_heating_start;
+    uint32_t duration_ms = CONFIG_TIP_SOFT_START_DURATION;
+    settings_heating_soft_start_duration_get(duration_ms);
+    if ((duration_ms == 0) || (elapsed >= duration_ms)) {
+        return current_limit_a;
+    }
+
+    return current_limit_a * (elapsed / (float)duration_ms);
+}
 
 /**
  *
@@ -369,6 +392,7 @@ int element_task(void) {
             }
 
             /* Turn on dc-dc */
+            m_timestamp_heating_start = millis();
             power_enabled_set(true);
 
             /* Move on */
@@ -391,7 +415,9 @@ int element_task(void) {
             }
 
             /* Use the current limit that was already determined for this heating cycle.
-             * It is stable throughout the whole heating pulse, so repeated negotiation calls are unnecessary. */
+             * It is stable throughout the whole heating pulse, so repeated negotiation calls are unnecessary.
+             * However, it is soft-started from zero up to its full value to avoid an
+             * inrush current spike whenever heating (re)starts. */
             float current_a = 0.0f;
             res = power_current_get(current_a);
             if (res < 0) {
@@ -399,15 +425,16 @@ int element_task(void) {
                 m_sm = STATE_3_START;
                 break;
             }
-            if (current_a > m_cycle_current_limit_a) {
-                log_w("USB current limit exceeded while heating: %.2fA > %.2fA, reducing DAC output", current_a, m_cycle_current_limit_a);
-                res = power_heating_current_limit_apply(current_a, m_cycle_current_limit_a);
+            float soft_start_current_limit_a = m_soft_start_current_limit_get(m_cycle_current_limit_a);
+            if (current_a > soft_start_current_limit_a) {
+                log_w("USB current limit exceeded while heating: %.2fA > %.2fA, reducing DAC output", current_a, soft_start_current_limit_a);
+                res = power_heating_current_limit_apply(current_a, soft_start_current_limit_a);
                 if (res < 0) {
                     power_enabled_set(false);
                     m_sm = STATE_3_START;
                     break;
                 }
-                const float reduction_factor = m_cycle_current_limit_a / current_a;
+                const float reduction_factor = soft_start_current_limit_a / current_a;
                 m_heating_duration = (m_heating_duration > 0.0f) ? (m_heating_duration * reduction_factor) : 0.0f;
                 if (m_heating_duration <= 0.0f) {
                     power_enabled_set(false);
