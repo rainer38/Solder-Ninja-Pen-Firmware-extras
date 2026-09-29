@@ -22,6 +22,7 @@ static fusb302 m_fusb302;         //!< USB Type-C and PD PHY controller
 static pi3usb9281c m_pi3usb9281;  //!< USB charger detection IC
 static Adafruit_INA219 m_ina219;  //!< INA219 current/voltage monitor for the power input path
 static dac5311 m_dac;             //!< DAC for buck converter regulation
+static float m_dac_voltage_v = 0.0f;  //!< Last DAC-controlled buck output voltage used for current-limited heating.
 
 /* Power options management */
 static struct {
@@ -88,6 +89,8 @@ static int m_adjust_buck(const float power_limit) {
                 return -1;
             }
 
+            m_dac_voltage_v = vdac;
+
             /* Return success */
             return 0;
         }
@@ -112,6 +115,53 @@ int power_current_get(float &current_a) {
      * This avoids an unnecessary extra conversion and matches the actual hardware.
      */
     current_a = m_ina219.getShuntVoltage_mV() / CONFIG_TIP_SHUNT_MILLIOHMS;
+    return 0;
+}
+
+/**
+ * @brief Reduce the DC-DC output voltage step by step to stay within the configured USB current budget.
+ *
+ * The current draw of the tip is approximately proportional to the buck output voltage
+ * for a resistive load. We therefore estimate the required buck voltage from the current
+ * overshoot and move the DAC toward that value instead of disabling heating altogether.
+ *
+ * @param[in] current_a Measured current in amperes
+ * @param[in] current_limit_a Maximum allowed current in amperes
+ * @return 0 on success, negative error code otherwise
+ */
+int power_heating_current_limit_apply(const float current_a, const float current_limit_a) {
+    if ((current_a <= 0.0f) || (current_limit_a <= 0.0f)) {
+        return 0;
+    }
+
+    if (current_a <= current_limit_a) {
+        return 0;
+    }
+
+    /* Reduce the output voltage proportionally to the current overshoot. */
+    float target_vdac = m_dac_voltage_v * (current_limit_a / current_a);
+    if (target_vdac < 0.0f) {
+        target_vdac = 0.0f;
+    }
+    if (target_vdac > 3.3f) {
+        target_vdac = 3.3f;
+    }
+
+    /* Make the correction step-wise so the loop converges smoothly without abruptly dropping heating. */
+    const float voltage_step_v = 0.05f;
+    if ((m_dac_voltage_v - target_vdac) > voltage_step_v) {
+        target_vdac = m_dac_voltage_v - voltage_step_v;
+    }
+
+    /* Update the DAC to the nearest safe value beneath the current limit. */
+    int res = m_dac.output_voltage_set(target_vdac);
+    if (res < 0) {
+        log_w("Failed to reduce buck voltage to %.2fV while current was %.2fA > %.2fA", target_vdac, current_a, current_limit_a);
+        return res;
+    }
+
+    m_dac_voltage_v = target_vdac;
+    log_w("Reduced buck voltage to %.2fV to stay below %.2fA (measured %.2fA)", target_vdac, current_limit_a, current_a);
     return 0;
 }
 
@@ -358,6 +408,46 @@ int power_negotiated_power_limit_get(float &power_limit) {
     /* Return success */
     power_limit = m_option_power_max_compute(contract);
     return 0;
+}
+
+/**
+ * @brief Gets the negotiated current limit, reduced by the configured safety factor.
+ *
+ * This helper ensures the heating control loop never requests more than the allowed
+ * percentage of the negotiated current from the USB source.
+ *
+ * @param[out] current_limit_a Current limit in amperes
+ * @return 0 on success, negative error code on failure
+ */
+int power_negotiated_current_limit_get(float &current_limit_a) {
+    int res;
+
+    struct power_option contract;
+    res = power_contract_get(contract);
+    if (res < 0) {
+        current_limit_a = 0.0f;
+        return -1;
+    }
+
+    /* Prefer the negotiated current limit when it is explicitly known. */
+    if (contract.current_max > 0.0f) {
+        float current_limit_factor = CONFIG_TIP_CURRENT_LIMIT_FACTOR;
+        settings_heating_current_limit_factor_get(current_limit_factor);
+        current_limit_a = contract.current_max * current_limit_factor;
+        return 0;
+    }
+
+    /* Fall back to power/voltage when only a power contract is available. */
+    if (contract.voltage_max > 0.0f) {
+        const float negotiated_power_w = m_option_power_max_compute(contract);
+        float current_limit_factor = CONFIG_TIP_CURRENT_LIMIT_FACTOR;
+        settings_heating_current_limit_factor_get(current_limit_factor);
+        current_limit_a = (negotiated_power_w / contract.voltage_max) * current_limit_factor;
+        return 0;
+    }
+
+    current_limit_a = 0.0f;
+    return -1;
 }
 
 /**

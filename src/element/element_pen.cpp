@@ -42,6 +42,7 @@ static uint32_t m_timestamp_cycle_start;
 static uint32_t m_timestamp_temperature_read;
 static uint32_t m_timestamp_pid_computed;
 static uint32_t m_heating_duration;
+static float m_cycle_current_limit_a;
 
 /**
  *
@@ -302,6 +303,35 @@ int element_task(void) {
             if (res < 0) {
                 break;
             }
+            float current_limit_a = 0.0f;
+            res = power_negotiated_current_limit_get(current_limit_a);
+            if (res < 0) {
+                break;
+            }
+            m_cycle_current_limit_a = current_limit_a;
+
+            /* Read actual current and trim the DC-DC output voltage upward or downward
+             * so the heater stays near the 80% USB limit instead of skipping the phase. */
+            float current_a = 0.0f;
+            res = power_current_get(current_a);
+            if (res < 0) {
+                break;
+            }
+            if (current_a > m_cycle_current_limit_a) {
+                log_w("USB current limit exceeded: %.2fA > %.2fA, reducing DAC output", current_a, m_cycle_current_limit_a);
+                res = power_heating_current_limit_apply(current_a, m_cycle_current_limit_a);
+                if (res < 0) {
+                    break;
+                }
+                /* Reduce the heating pulse so we do not immediately re-enter the over-limit regime. */
+                if (m_heating_duration > 0) {
+                    m_heating_duration *= (m_cycle_current_limit_a / current_a);
+                }
+                if (m_heating_duration <= 0) {
+                    m_sm = STATE_3_START;
+                    break;
+                }
+            }
 
             /* Ensure we have still time to heat in this cycle
              * which might no ne the case if we had to retry reading the temperature too many times */
@@ -358,6 +388,32 @@ int element_task(void) {
             if ((millis() - m_temperature_filter_last_addition) >= 100) {
                 m_temperature_filter.add(temperature_estimate);
                 m_temperature_filter_last_addition = millis();
+            }
+
+            /* Use the current limit that was already determined for this heating cycle.
+             * It is stable throughout the whole heating pulse, so repeated negotiation calls are unnecessary. */
+            float current_a = 0.0f;
+            res = power_current_get(current_a);
+            if (res < 0) {
+                power_enabled_set(false);
+                m_sm = STATE_3_START;
+                break;
+            }
+            if (current_a > m_cycle_current_limit_a) {
+                log_w("USB current limit exceeded while heating: %.2fA > %.2fA, reducing DAC output", current_a, m_cycle_current_limit_a);
+                res = power_heating_current_limit_apply(current_a, m_cycle_current_limit_a);
+                if (res < 0) {
+                    power_enabled_set(false);
+                    m_sm = STATE_3_START;
+                    break;
+                }
+                const float reduction_factor = m_cycle_current_limit_a / current_a;
+                m_heating_duration = (m_heating_duration > 0.0f) ? (m_heating_duration * reduction_factor) : 0.0f;
+                if (m_heating_duration <= 0.0f) {
+                    power_enabled_set(false);
+                    m_sm = STATE_3_START;
+                    break;
+                }
             }
 
             /* Wait for the end of the heating cycle */

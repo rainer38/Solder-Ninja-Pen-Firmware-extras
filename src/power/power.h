@@ -46,6 +46,17 @@ int power_setup(void);
  * @return 0 on success, negative error code on failure
  */
 int power_current_get(float &current_a);
+/** * @brief Reduce the DC-DC output voltage step-by-step to keep the measured current
+ * below the configured USB safety limit.
+ *
+ * This is used by the heater control loop to approach the 80% limit smoothly
+ * instead of dropping the heating phase completely.
+ *
+ * @param[in] current_a Measured current in amperes
+ * @param[in] current_limit_a Maximum allowed current in amperes
+ * @return 0 on success, negative error code otherwise
+ */
+int power_heating_current_limit_apply(const float current_a, const float current_limit_a);
 /**
  * @brief Power source provider enumeration
  *
@@ -117,6 +128,14 @@ int power_contract_get(struct power_option &contract);
  * @return 0 on success, negative error code on failure
  */
 int power_negotiated_power_limit_get(float &power_limit);
+
+/**
+ * @brief Get the negotiated current limit in amperes with the configured safety factor applied.
+ *
+ * @param[out] current_limit_a Current limit in amperes
+ * @return 0 on success, negative error code on failure
+ */
+int power_negotiated_current_limit_get(float &current_limit_a);
 
 /** @} */
 
