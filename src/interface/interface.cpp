@@ -52,6 +52,54 @@ static enum {
     STATE_MENU_ACCELEROMETER_IDLE_TIME_1,
     STATE_MENU_UPDATE_0,
 } m_sm;
+static float m_heating_current_display_samples[CONFIG_UI_HEATING_CURRENT_AVERAGE_SAMPLE_COUNT];
+static float m_heating_current_display_sum_a;
+static uint8_t m_heating_current_display_sample_index;
+static uint8_t m_heating_current_display_sample_count;
+static uint32_t m_heating_current_display_sample_timestamp;
+
+/**
+ * @brief Clears the rolling average used for the heating-screen current display.
+ *
+ * The next valid current sample initializes the display average again.
+ */
+static void m_heating_current_display_average_reset(void) {
+    m_heating_current_display_sum_a = 0.0f;
+    m_heating_current_display_sample_index = 0;
+    m_heating_current_display_sample_count = 0;
+    m_heating_current_display_sample_timestamp = 0;
+}
+
+/**
+ * @brief Updates and returns the rolling average used only for the heating-screen display.
+ *
+ * Samples are added at the configured interval to the configured rolling window. The returned
+ * current is in amperes; this average is not used by the heating control loop.
+ *
+ * @param[in] current_a Latest INA219 current sample in amperes
+ * @return Averaged display current in amperes
+ */
+static float m_heating_current_display_average_get(const float current_a) {
+    const uint8_t sample_count = sizeof(m_heating_current_display_samples) / sizeof(m_heating_current_display_samples[0]);
+    const uint32_t timestamp = millis();
+
+    if (m_heating_current_display_sample_count == 0) {
+        for (uint8_t i = 0; i < sample_count; i++) {
+            m_heating_current_display_samples[i] = current_a;
+        }
+        m_heating_current_display_sum_a = current_a * sample_count;
+        m_heating_current_display_sample_count = sample_count;
+        m_heating_current_display_sample_timestamp = timestamp;
+    } else if ((timestamp - m_heating_current_display_sample_timestamp) >= CONFIG_UI_HEATING_CURRENT_AVERAGE_SAMPLE_PERIOD_MS) {
+        m_heating_current_display_sum_a -= m_heating_current_display_samples[m_heating_current_display_sample_index];
+        m_heating_current_display_samples[m_heating_current_display_sample_index] = current_a;
+        m_heating_current_display_sum_a += current_a;
+        m_heating_current_display_sample_index = (m_heating_current_display_sample_index + 1) % sample_count;
+        m_heating_current_display_sample_timestamp = timestamp;
+    }
+
+    return m_heating_current_display_sum_a / sample_count;
+}
 
 /**
  * @brief Initialize the user interface system
@@ -340,6 +388,8 @@ int interface_task(void) {
 
         case STATE_MONITOR_REDIRECT: {
 
+            m_heating_current_display_average_reset();
+
             /* Move on according to controller state */
             switch (controller_state_get()) {
                 case CONTROLLER_STATE_LOCKED: {
@@ -492,8 +542,17 @@ int interface_task(void) {
             } else {
                 m_library.setCursor(11 * 6, 0);
                 m_library.printf("%4.1fV", contract.voltage_max);
+
+                /* Show the actual measured current rather than the negotiated limit while heating, falling back to it on error */
+                float current_a = 0.0f;
+                res = power_current_get(current_a);
                 m_library.setCursor(12 * 6, 9);
-                m_library.printf("%3.1fA", contract.current_max);
+                if (res < 0) {
+                    m_heating_current_display_average_reset();
+                    m_library.printf("%3.1fA", contract.current_max);
+                } else {
+                    m_library.printf("%3.1fA", m_heating_current_display_average_get(current_a));
+                }
             }
             m_library.display();
 

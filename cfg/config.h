@@ -26,5 +26,7 @@
 #define CONFIG_UI_SPLASH_DURATION 1500  //!< Duration of the splash screen (in milliseconds).
 #define CONFIG_UI_INFO_DURATION 1500    //!< Duration of each information screen (in milliseconds).
 #define CONFIG_UI_ADJUST_DURATION 1000  //!< Amount of time the target temperature is displayed before reverting to the measured temperature (in milliseconds).
+#define CONFIG_UI_HEATING_CURRENT_AVERAGE_SAMPLE_COUNT 10  //!< Number of INA219 samples in the heating-screen current average.
+#define CONFIG_UI_HEATING_CURRENT_AVERAGE_SAMPLE_PERIOD_MS 100  //!< Minimum interval between samples in the heating-screen current average (milliseconds).
 
 #endif
