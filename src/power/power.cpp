@@ -7,6 +7,7 @@
 #include "settings/settings.h"
 
 /* Arduino headers */
+#include <Adafruit_INA219.h>
 #include <dac5311.h>
 #include <fsusb43.h>
 #include <fusb302.h>
@@ -19,6 +20,7 @@
 static fsusb43 m_fsusb43;         //!< USB mux controller
 static fusb302 m_fusb302;         //!< USB Type-C and PD PHY controller
 static pi3usb9281c m_pi3usb9281;  //!< USB charger detection IC
+static Adafruit_INA219 m_ina219;  //!< INA219 current/voltage monitor for the power input path
 static dac5311 m_dac;             //!< DAC for buck converter regulation
 
 /* Power options management */
@@ -93,6 +95,24 @@ static int m_adjust_buck(const float power_limit) {
 
     /* Return failure */
     return -1;
+}
+/**
+ * @brief Reads the current from the INA219 power monitor.
+ *
+ * Helper for future heater-control loops that want actual input-side current feedback.
+ *
+ * @param[out] current_a Current in amperes
+ * @return 0 on success, negative error code otherwise
+ */
+int power_current_get(float &current_a) {
+    /*
+     * The INA219 reports the shunt voltage in millivolts. For a 16 mΩ shunt,
+     * the current is simply Vshunt_mV / 16, because:
+     *  I = V / R = (V_mV / 1000) / 0.016 = V_mV / 16
+     * This avoids an unnecessary extra conversion and matches the actual hardware.
+     */
+    current_a = m_ina219.getShuntVoltage_mV() / CONFIG_TIP_SHUNT_MILLIOHMS;
+    return 0;
 }
 
 /**
@@ -197,6 +217,16 @@ static void m_options_clear(void) {
  */
 int power_setup(void) {
     int res;
+    /* Initialize INA219 current/voltage monitor for the USB input path.
+     * We intentionally do not use the library's default calibration because this
+     * board has a 0.016 Ω shunt and we calculate current from the measured shunt
+     * voltage to keep the result accurate. */
+    if (!m_ina219.begin()) {
+        log_e("Failed to setup INA219 current sensor!");
+        return -ERROR_PERIPHERAL_SETUP_ERROR;
+    }
+    log_i("INA219 current monitor initialized (0.016 Ω shunt).");
+
 
     /* Initialize USB charger detection IC (PI3USB9281C)
      * This IC detects USB charging capabilities and port types */

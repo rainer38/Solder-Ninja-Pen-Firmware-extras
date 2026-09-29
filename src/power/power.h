@@ -37,6 +37,16 @@
 int power_setup(void);
 
 /**
+ * @brief Reads the current delivered to the heater path.
+ *
+ * This function is intended for future tip-heating control loops that need
+ * real current feedback from the USB input side.
+ *
+ * @param[out] current_a Current in amperes
+ * @return 0 on success, negative error code on failure
+ */
+int power_current_get(float &current_a);
+/**
  * @brief Power source provider enumeration
  *
  * Defines the different USB power negotiation protocols and sources
