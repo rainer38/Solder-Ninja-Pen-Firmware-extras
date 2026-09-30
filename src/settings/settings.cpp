@@ -1535,6 +1535,48 @@ int settings_heating_soft_start_duration_set(const uint32_t duration_ms) {
 }
 
 /**
+ * @brief Get the tip resistance measurement offset
+ * @param[out] offset_ohms Offset from -1.0 to 1.0 ohms in 0.1-ohm increments
+ * @return 1 if found, 0 if not found or invalid
+ */
+int settings_heating_tip_resistance_offset_get(float &offset_ohms) {
+    offset_ohms = CONFIG_TIP_RESISTANCE_OFFSET_INVALID_OHMS;
+
+    if (m_doc["preferences"]["heating"]["tip_resistance_offset_tenths"].is<int>() != true) {
+        return 0;
+    }
+
+    const int offset_tenths = m_doc["preferences"]["heating"]["tip_resistance_offset_tenths"];
+    if ((offset_tenths < CONFIG_TIP_RESISTANCE_OFFSET_MIN_TENTHS) ||
+        (offset_tenths > CONFIG_TIP_RESISTANCE_OFFSET_MAX_TENTHS)) {
+        return 0;
+    }
+
+    offset_ohms = offset_tenths / 10.0f;
+    return 1;
+}
+
+/**
+ * @brief Set the tip resistance measurement offset
+ * @param[in] offset_ohms Offset from -1.0 to 1.0 ohms in 0.1-ohm increments
+ * @return 0 on success, negative error code on failure
+ */
+int settings_heating_tip_resistance_offset_set(const float offset_ohms) {
+    const int offset_tenths = (int)(offset_ohms * 10.0f + ((offset_ohms < 0.0f) ? -0.5f : 0.5f));
+    const float offset_tenths_error = (offset_ohms * 10.0f) - offset_tenths;
+    if ((offset_tenths < CONFIG_TIP_RESISTANCE_OFFSET_MIN_TENTHS) ||
+        (offset_tenths > CONFIG_TIP_RESISTANCE_OFFSET_MAX_TENTHS) ||
+        (offset_tenths_error < -0.001f) || (offset_tenths_error > 0.001f)) {
+        return -EINVAL;
+    }
+
+    m_doc["preferences"]["heating"]["tip_resistance_offset_tenths"] = offset_tenths;
+    m_modified = true;
+    m_modified_timestamp = millis();
+    return 0;
+}
+
+/**
  * @brief Get the maximum USB voltage in volts
  * @param[out] voltage Maximum USB voltage in volts
  * @return 1 if found, 0 if not found

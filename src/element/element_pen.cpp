@@ -3,6 +3,7 @@
 
 /* Project */
 #include "errors/errors.h"
+#include "interface/interface.h"
 #include "log/log.h"
 #include "power/power.h"
 #include "settings/settings.h"
@@ -171,12 +172,14 @@ int element_heating_disable(void) {
  */
 int element_task(void) {
     int res;
+    static bool m_tip_resistance_calibrated;
 
     /* State machine */
     static enum {
         STATE_0_DISCONNECTED,
         STATE_1_DEBOUNCE,
         STATE_2_DISABLED,
+        STATE_2_CALIBRATE,
         STATE_3_START,
         STATE_4_READ,
         STATE_5_HEAT,
@@ -185,6 +188,9 @@ int element_task(void) {
     switch (m_sm) {
 
         case STATE_0_DISCONNECTED: {
+
+            power_tip_resistance_measure_cancel();
+            m_tip_resistance_calibrated = false;
 
             /* Ensure pid is disabled */
             m_pid.SetMode(MANUAL);
@@ -233,8 +239,57 @@ int element_task(void) {
             /* Ensure pid is disabled */
             m_pid.SetMode(MANUAL);
 
-            /* Move on */
+            if (m_tip_resistance_calibrated != true) {
+                m_sm = STATE_2_CALIBRATE;
+                break;
+            }
+
+            if (m_heating_enabled != true) {
+                power_enabled_set(false);
+                m_sm = STATE_4_READ;
+                break;
+            }
+
             m_sm = STATE_3_START;
+            break;
+        }
+
+        case STATE_2_CALIBRATE: {
+
+            /* Keep checking the thermocouple while waiting for the USB contract and probe to complete. */
+            static uint32_t m_timestamp_calibration_read;
+            if ((millis() - m_timestamp_calibration_read) >= CONFIG_TIP_READ_PERIOD) {
+                m_timestamp_calibration_read = millis();
+                float temperature_thermocouple_c = 0.0f;
+                float temperature_internal_c = 0.0f;
+                bool is_shorted_vcc = false;
+                bool is_shorted_gnd = false;
+                bool is_open = false;
+                res = m_thermocouple_afe.read(temperature_thermocouple_c, temperature_internal_c, is_shorted_vcc, is_shorted_gnd, is_open);
+                if ((res < 0) || (is_shorted_vcc == true) || (is_open == true)) {
+                    power_tip_resistance_measure_cancel();
+                    m_sm = STATE_0_DISCONNECTED;
+                    break;
+                }
+
+                m_timestamp_temperature_read = millis();
+            }
+
+            res = power_tip_resistance_measure_task();
+            if (res > 0) {
+                float resistance_ohms = CONFIG_TIP_RESISTANCE_DEFAULT_OHMS;
+                power_tip_resistance_get(resistance_ohms);
+                interface_tip_resistance_result_show(resistance_ohms, res != 1);
+                m_tip_resistance_calibrated = true;
+                m_sm = STATE_2_DISABLED;
+            } else if (res < 0) {
+                float resistance_ohms = CONFIG_TIP_RESISTANCE_DEFAULT_OHMS;
+                power_tip_resistance_get(resistance_ohms);
+                interface_tip_resistance_result_show(resistance_ohms, true);
+                power_tip_resistance_measure_cancel();
+                power_enabled_set(false);
+                m_sm = STATE_ERROR;
+            }
             break;
         }
 
@@ -321,7 +376,9 @@ int element_task(void) {
                 break;
             }
 
-            /* Ask usb power negotiator how much power we are allowed to draw */
+            /* Ask usb power negotiator how much power we are allowed to draw.
+             * The negotiated contract is stable while the tip is heating, so the current
+             * limit is evaluated once per cycle and then reused below. */
             res = power_negotiated_power_limit_get(m_power_limit);
             if (res < 0) {
                 break;

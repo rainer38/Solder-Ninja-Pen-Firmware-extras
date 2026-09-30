@@ -23,6 +23,32 @@ static pi3usb9281c m_pi3usb9281;  //!< USB charger detection IC
 static Adafruit_INA219 m_ina219;  //!< INA219 current/voltage monitor for the power input path
 static dac5311 m_dac;             //!< DAC for buck converter regulation
 static float m_dac_voltage_v = 0.0f;  //!< Last DAC-controlled buck output voltage used for current-limited heating.
+static float m_tip_resistance_unadjusted_ohms = CONFIG_TIP_RESISTANCE_DEFAULT_OHMS;
+static float m_tip_resistance_ohms = CONFIG_TIP_RESISTANCE_DEFAULT_OHMS;
+static bool m_tip_resistance_power_wait_completed;
+static enum {
+    TIP_RESISTANCE_MEASUREMENT_IDLE,
+    TIP_RESISTANCE_MEASUREMENT_WAIT_POWER,
+    TIP_RESISTANCE_MEASUREMENT_SETTLE,
+    TIP_RESISTANCE_MEASUREMENT_SAMPLE,
+} m_tip_resistance_measurement_state;
+static uint32_t m_tip_resistance_measurement_timestamp;
+static uint32_t m_tip_resistance_sample_timestamp;
+static uint8_t m_tip_resistance_sample_count;
+static float m_tip_resistance_input_power_sum_w;
+
+static bool m_tip_resistance_offset_get(float &offset_ohms) {
+    return settings_heating_tip_resistance_offset_get(offset_ohms) == 1;
+}
+
+static void m_tip_resistance_value_update(void) {
+    float offset_ohms = CONFIG_TIP_RESISTANCE_OFFSET_INVALID_OHMS;
+    if (m_tip_resistance_offset_get(offset_ohms) != true) {
+        m_tip_resistance_ohms = CONFIG_TIP_RESISTANCE_DEFAULT_OHMS;
+        return;
+    }
+    m_tip_resistance_ohms = m_tip_resistance_unadjusted_ohms + offset_ohms;
+}
 
 /* Power options management */
 static struct {
@@ -40,6 +66,23 @@ static int m_qc_dn_m_pin = 29;  //!< HVDCP D- middle resistor pin
 static int m_qc_dp_m_pin = 28;  //!< HVDCP D+ middle resistor pin
 
 /**
+ * @brief Computes the buck converter output voltage for a DAC voltage.
+ *
+ * Uses the feedback resistor network to convert the DAC output voltage into the
+ * corresponding DC-DC converter output voltage.
+ *
+ * @param[in] vdac DAC output voltage in volts
+ * @return Estimated buck converter output voltage in volts
+ */
+static float m_dac_output_voltage_compute(const float vdac) {
+    const float rtop = 590.0f * 1000.0f;
+    const float rbot = 63.4f * 1000.0f;
+    const float rdac = 300.0f * 1000.0f;
+    const float vref = 0.7f;
+    return vref * (1.0f + rtop / rbot) + (vref - vdac) * (rtop / rdac);
+}
+
+/**
  * @brief Adjusts the buck converter output voltage based on desired power limit
  *
  * This function calculates the required DAC voltage to achieve the target power output
@@ -48,7 +91,7 @@ static int m_qc_dp_m_pin = 28;  //!< HVDCP D+ middle resistor pin
  * @param[in] power_limit Desired output power in watts (must be > 0)
  * @return 0 on success, negative error code otherwise
  *
- * @note Current implementation uses fixed efficiency (80%) and load resistance (2.1Ω).
+ * @note Current implementation uses fixed efficiency (80%) and the detected tip resistance.
  *       Future improvements could include:
  *       - Dynamic efficiency calculation based on Vin, Vout, Iout, and temperature
  *       - Temperature-dependent load resistance modeling using thermal coefficient
@@ -58,10 +101,8 @@ static int m_adjust_buck(const float power_limit) {
 
     /* Calculate required buck converter output voltage
      * Using power formula: P = V²/R, solving for V = sqrt(P * R)
-     * Where R is the load resistance (2.1Ω) and efficiency is considered */
-    const float buck_efficiency = 0.80f;
-    const float load_resistance = 2.1f;
-    float buck_voltage = sqrt((power_limit * buck_efficiency) * load_resistance);
+    * Where R is the detected tip resistance and efficiency is considered */
+    float buck_voltage = sqrt((power_limit * CONFIG_TIP_BUCK_EFFICIENCY) * m_tip_resistance_ohms);
     log_d("Using buck voltage of %.2fV.", buck_voltage);
 
     /* Configure DAC5311 to set the buck converter output voltage
@@ -69,14 +110,9 @@ static int m_adjust_buck(const float power_limit) {
      * @note This could be optimized with direct calculation:
      * Vdac = (Vref * (1 + Rtop/Rbot + Rtop/Rdac) - Vout_target) * (Rdac/Rtop)
      * DAC_code = (Vdac / 3.3V) * 255 */
-    const float rtop = 590 * 1000;   // Top resistor value (590kΩ)
-    const float rbot = 63.4 * 1000;  // Bottom resistor value (63.4kΩ)
-    const float rdac = 300 * 1000;   // DAC resistor value (300kΩ)
-    const float vref = 0.7;          // Reference voltage (0.7V)
-
     for (uint16_t i = 0; i < 256; i++) {
         float vdac = 3.3 * (i / 255.00);
-        float vout = vref * (1 + rtop / rbot) + (vref - vdac) * (rtop / rdac);
+        float vout = m_dac_output_voltage_compute(vdac);
 
         /* Check if this DAC setting produces the desired output voltage */
         if ((vout <= buck_voltage) || (i == 255)) {
@@ -99,6 +135,7 @@ static int m_adjust_buck(const float power_limit) {
     /* Return failure */
     return -1;
 }
+
 /**
  * @brief Reads the current from the INA219 power monitor.
  *
@@ -162,6 +199,31 @@ int power_heating_current_limit_apply(const float current_a, const float current
 
     m_dac_voltage_v = target_vdac;
     log_w("Reduced buck voltage to %.2fV to stay below %.2fA (measured %.2fA)", target_vdac, current_limit_a, current_a);
+    return 0;
+}
+
+/**
+ * @brief Reads the bus voltage from the INA219 power monitor.
+ *
+ * @param[out] voltage_v Voltage in volts
+ * @return 0 on success, negative error code otherwise
+ */
+int power_voltage_get(float &voltage_v) {
+    voltage_v = m_ina219.getBusVoltage_V();
+    return 0;
+}
+
+/**
+ * @brief Gets the tip resistance currently used for buck regulation.
+ *
+ * Returns the selected nominal resistance, or the configured default when a
+ * valid measurement is unavailable.
+ *
+ * @param[out] resistance_ohms Current tip resistance in ohms
+ * @return 0 on success
+ */
+int power_tip_resistance_get(float &resistance_ohms) {
+    resistance_ohms = m_tip_resistance_ohms;
     return 0;
 }
 
@@ -253,6 +315,28 @@ static void m_options_clear(void) {
 }
 
 /**
+ * @brief Gets the maximum power available from the assigned power options.
+ * @return Maximum available power in watts, or 0 if no power option is assigned
+ */
+static float m_available_power_max_get(void) {
+    float power_max = 0.0f;
+    for (unsigned int i = 0; i < POWER_OPTIONS_LIMIT; i++) {
+        if (m_options[i].assigned == true) {
+            float power_iter = m_option_power_max_compute(m_options[i].option);
+            if (power_iter > power_max) {
+                power_max = power_iter;
+            }
+        }
+    }
+    return power_max;
+}
+
+int power_tip_resistance_offset_apply(void) {
+    m_tip_resistance_value_update();
+    return m_adjust_buck(m_available_power_max_get());
+}
+
+/**
  * @brief Initializes the power management module and all associated peripherals
  *
  * This function sets up all the hardware components required for USB power negotiation:
@@ -267,6 +351,7 @@ static void m_options_clear(void) {
  */
 int power_setup(void) {
     int res;
+
     /* Initialize INA219 current/voltage monitor for the USB input path.
      * We intentionally do not use the library's default calibration because this
      * board has a 0.016 Ω shunt and we calculate current from the measured shunt
@@ -276,7 +361,6 @@ int power_setup(void) {
         return -ERROR_PERIPHERAL_SETUP_ERROR;
     }
     log_i("INA219 current monitor initialized (0.016 Ω shunt).");
-
 
     /* Initialize USB charger detection IC (PI3USB9281C)
      * This IC detects USB charging capabilities and port types */
@@ -451,6 +535,160 @@ int power_negotiated_current_limit_get(float &current_limit_a) {
 }
 
 /**
+ * @brief Advances the non-blocking tip resistance measurement.
+ *
+ * Applies a bounded test voltage, averages INA219 input-power samples, estimates
+ * the tip resistance, and selects the matching nominal resistance for buck control.
+ *
+ * @return 0 while waiting or collecting samples, 1 when a valid measurement
+ *         completes, 2 when the measurement is skipped or falls back to the
+ *         default resistance, negative error code if setup or cleanup fails
+ */
+int power_tip_resistance_measure_task(void) {
+    const float test_dac_voltage_v = 3.3f;
+    const float test_output_voltage_v = m_dac_output_voltage_compute(test_dac_voltage_v);
+
+    if (m_tip_resistance_measurement_state == TIP_RESISTANCE_MEASUREMENT_IDLE) {
+        power_enabled_set(false);
+        m_tip_resistance_unadjusted_ohms = CONFIG_TIP_RESISTANCE_DEFAULT_OHMS;
+        m_tip_resistance_value_update();
+        m_tip_resistance_measurement_timestamp = millis();
+        m_tip_resistance_measurement_state = TIP_RESISTANCE_MEASUREMENT_WAIT_POWER;
+    }
+
+    if (m_tip_resistance_measurement_state == TIP_RESISTANCE_MEASUREMENT_WAIT_POWER) {
+        float current_limit_a = 0.0f;
+        float input_voltage_v = 0.0f;
+        struct power_option contract;
+        int res = power_contract_get(contract);
+        bool usb_power_contract_ready = (res == 0) &&
+                                        (contract.voltage_max >= CONFIG_TIP_RESISTANCE_MINIMUM_USB_VOLTAGE_V) &&
+                                        (contract.current_max >= CONFIG_TIP_RESISTANCE_MINIMUM_USB_CURRENT_A);
+        bool probe_power_ready = false;
+
+        if (usb_power_contract_ready &&
+            (power_negotiated_current_limit_get(current_limit_a) == 0) &&
+            (power_voltage_get(input_voltage_v) == 0) &&
+            (current_limit_a > 0.0f) &&
+            (input_voltage_v > 0.0f)) {
+            probe_power_ready = true;
+        }
+
+        if (probe_power_ready != true) {
+            if ((m_tip_resistance_power_wait_completed != true) &&
+                ((millis() - m_tip_resistance_measurement_timestamp) < CONFIG_TIP_RESISTANCE_POWER_WAIT_TIMEOUT)) {
+                return 0;
+            }
+
+            m_tip_resistance_power_wait_completed = true;
+            log_w("No valid USB power contract (minimum %.1fV and %.1fA) for tip resistance probe; using default %.1f ohm",
+                CONFIG_TIP_RESISTANCE_MINIMUM_USB_VOLTAGE_V,
+                CONFIG_TIP_RESISTANCE_MINIMUM_USB_CURRENT_A,
+                m_tip_resistance_ohms);
+            m_tip_resistance_measurement_state = TIP_RESISTANCE_MEASUREMENT_IDLE;
+            return 2;
+        }
+
+        m_tip_resistance_power_wait_completed = true;
+
+        const float worst_case_input_current_a = (test_output_voltage_v * test_output_voltage_v) /
+                             (CONFIG_TIP_BUCK_EFFICIENCY * input_voltage_v * CONFIG_TIP_RESISTANCE_ALTERNATIVE_OHMS);
+        if (worst_case_input_current_a > (current_limit_a * 0.8f)) {
+            log_w("Skipping tip resistance probe: estimated %.2fA exceeds probe budget %.2fA", worst_case_input_current_a, current_limit_a * 0.8f);
+            m_tip_resistance_measurement_state = TIP_RESISTANCE_MEASUREMENT_IDLE;
+            return 2;
+        }
+
+        res = m_dac.output_voltage_set(test_dac_voltage_v);
+        if (res < 0) {
+            m_tip_resistance_measurement_state = TIP_RESISTANCE_MEASUREMENT_IDLE;
+            return res;
+        }
+        m_dac_voltage_v = test_dac_voltage_v;
+        m_tip_resistance_input_power_sum_w = 0.0f;
+        m_tip_resistance_sample_count = 0;
+        m_tip_resistance_measurement_timestamp = millis();
+        power_enabled_set(true);
+        m_tip_resistance_measurement_state = TIP_RESISTANCE_MEASUREMENT_SETTLE;
+        return 0;
+    }
+
+    if (m_tip_resistance_measurement_state == TIP_RESISTANCE_MEASUREMENT_SETTLE) {
+        if ((millis() - m_tip_resistance_measurement_timestamp) < CONFIG_TIP_RESISTANCE_MEASUREMENT_SETTLE_TIME) {
+            return 0;
+        }
+        m_tip_resistance_measurement_state = TIP_RESISTANCE_MEASUREMENT_SAMPLE;
+        m_tip_resistance_sample_timestamp = millis() - CONFIG_TIP_RESISTANCE_MEASUREMENT_SAMPLE_PERIOD;
+    }
+
+    if (m_tip_resistance_measurement_state == TIP_RESISTANCE_MEASUREMENT_SAMPLE) {
+        if ((millis() - m_tip_resistance_sample_timestamp) < CONFIG_TIP_RESISTANCE_MEASUREMENT_SAMPLE_PERIOD) {
+            return 0;
+        }
+        m_tip_resistance_sample_timestamp = millis();
+
+        float current_a = 0.0f;
+        float input_voltage_v = 0.0f;
+        if ((power_current_get(current_a) < 0) || (power_voltage_get(input_voltage_v) < 0)) {
+            power_tip_resistance_measure_cancel();
+            return -1;
+        }
+        m_tip_resistance_input_power_sum_w += current_a * input_voltage_v;
+        m_tip_resistance_sample_count++;
+        if (m_tip_resistance_sample_count < CONFIG_TIP_RESISTANCE_MEASUREMENT_SAMPLE_COUNT) {
+            return 0;
+        }
+
+        const float average_input_power_w = m_tip_resistance_input_power_sum_w / CONFIG_TIP_RESISTANCE_MEASUREMENT_SAMPLE_COUNT;
+        bool measurement_valid = false;
+        if (average_input_power_w > 0.1f) {
+            const float unadjusted_resistance_ohms = (test_output_voltage_v * test_output_voltage_v) / (CONFIG_TIP_BUCK_EFFICIENCY * average_input_power_w);
+            float offset_ohms = CONFIG_TIP_RESISTANCE_OFFSET_INVALID_OHMS;
+            const bool offset_configured = m_tip_resistance_offset_get(offset_ohms);
+            const float measured_resistance_ohms = unadjusted_resistance_ohms + (offset_configured ? offset_ohms : 0.0f);
+            if ((measured_resistance_ohms >= CONFIG_TIP_RESISTANCE_MEASUREMENT_MIN_VALID_OHMS) &&
+                (measured_resistance_ohms <= CONFIG_TIP_RESISTANCE_MEASUREMENT_MAX_VALID_OHMS)) {
+                m_tip_resistance_unadjusted_ohms = unadjusted_resistance_ohms;
+                m_tip_resistance_ohms = offset_configured ? measured_resistance_ohms : CONFIG_TIP_RESISTANCE_DEFAULT_OHMS;
+                measurement_valid = offset_configured;
+                log_i("Tip resistance measured at %.2f ohm; using %.1f ohm", measured_resistance_ohms, m_tip_resistance_ohms);
+            } else {
+                m_tip_resistance_unadjusted_ohms = CONFIG_TIP_RESISTANCE_DEFAULT_OHMS;
+                m_tip_resistance_value_update();
+                log_w("Tip resistance probe gave out-of-range result %.2f ohm; using %.1f ohm", measured_resistance_ohms, m_tip_resistance_ohms);
+            }
+        } else {
+            m_tip_resistance_unadjusted_ohms = CONFIG_TIP_RESISTANCE_DEFAULT_OHMS;
+            m_tip_resistance_value_update();
+            log_w("Tip resistance probe current too low; using %.1f ohm", m_tip_resistance_ohms);
+        }
+
+        int res = power_tip_resistance_measure_cancel();
+        return (res < 0) ? res : (measurement_valid ? 1 : 2);
+    }
+
+    return 0;
+}
+
+/**
+ * @brief Stops the tip resistance measurement and restores normal buck regulation.
+ *
+ * Disables the converter, resets the measurement state, and recalculates the DAC
+ * output using the current available power and selected tip resistance.
+ *
+ * @return 0 on success, negative error code if the DAC output could not be restored
+ */
+int power_tip_resistance_measure_cancel(void) {
+    if (m_tip_resistance_measurement_state == TIP_RESISTANCE_MEASUREMENT_IDLE) {
+        return 0;
+    }
+
+    power_enabled_set(false);
+    m_tip_resistance_measurement_state = TIP_RESISTANCE_MEASUREMENT_IDLE;
+    return m_adjust_buck(m_available_power_max_get());
+}
+
+/**
  * @brief Enables or disables the DC-DC converter supplying the tip with power
  *
  * This function controls the enable pin of the DC-DC converter to turn the power
@@ -510,15 +748,7 @@ int power_task(void) {
         m_options_changed = false;
 
         /* Find the best available power option */
-        float power_best = 0;
-        for (unsigned int i = 0; i < POWER_OPTIONS_LIMIT; i++) {
-            if (m_options[i].assigned == true) {
-                float power_iter = m_option_power_max_compute(m_options[i].option);
-                if (power_iter > power_best) {
-                    power_best = power_iter;
-                }
-            }
-        }
+        float power_best = m_available_power_max_get();
 
         /* Adjust buck converter */
         res = m_adjust_buck(power_best);

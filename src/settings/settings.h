@@ -66,6 +66,20 @@ int settings_heating_current_limit_factor_set(const float factor);
 int settings_heating_soft_start_duration_get(uint32_t &duration_ms);
 int settings_heating_soft_start_duration_set(const uint32_t duration_ms);
 
+/**
+ * @brief Gets the persisted tip resistance measurement offset.
+ * @param[out] offset_ohms Offset in ohms, defaulting to 0.0 when unset
+ * @return 1 if found, 0 if not found or invalid
+ */
+int settings_heating_tip_resistance_offset_get(float &offset_ohms);
+
+/**
+ * @brief Persists the tip resistance measurement offset.
+ * @param[in] offset_ohms Offset from -1.0 to 1.0 ohms in 0.1-ohm increments
+ * @return 0 on success, negative error code on failure
+ */
+int settings_heating_tip_resistance_offset_set(const float offset_ohms);
+
 /* Diagnostics */
 int settings_diagnostics_heating_time_get(uint32_t &seconds);
 int settings_diagnostics_heating_time_increment(const uint32_t seconds);

@@ -46,6 +46,46 @@ int power_setup(void);
  * @return 0 on success, negative error code on failure
  */
 int power_current_get(float &current_a);
+
+/**
+ * @brief Gets the tip resistance currently used for buck regulation.
+ *
+ * Returns the selected nominal resistance, or the configured default when a
+ * valid measurement is unavailable.
+ *
+ * @param[out] resistance_ohms Current tip resistance in ohms
+ * @return 0 on success
+ */
+int power_tip_resistance_get(float &resistance_ohms);
+
+/**
+ * @brief Applies the configured tip resistance offset to regulation.
+ * @return 0 on success, negative error code if buck regulation fails
+ */
+int power_tip_resistance_offset_apply(void);
+
+/**
+ * @brief Advances the non-blocking tip resistance measurement.
+ *
+ * Call periodically while the measurement is active. The probe is skipped when
+ * USB-PD power is unavailable or its safety budget is insufficient.
+ *
+ * @return 0 while waiting or collecting samples, 1 when a valid measurement
+ *         completes, 2 when the measurement is skipped or falls back to the
+ *         default resistance, negative error code on failure
+ */
+int power_tip_resistance_measure_task(void);
+
+/**
+ * @brief Cancels an active tip resistance measurement.
+ *
+ * Disables the probe output and restores buck regulation using the available
+ * power and currently selected tip resistance.
+ *
+ * @return 0 on success, negative error code if buck regulation cannot be restored
+ */
+int power_tip_resistance_measure_cancel(void);
+
 /** * @brief Reduce the DC-DC output voltage step-by-step to keep the measured current
  * below the configured USB safety limit.
  *
@@ -57,6 +97,14 @@ int power_current_get(float &current_a);
  * @return 0 on success, negative error code otherwise
  */
 int power_heating_current_limit_apply(const float current_a, const float current_limit_a);
+
+/** * @brief Reads the bus voltage feeding the power path.
+ *
+ * @param[out] voltage_v Voltage in volts
+ * @return 0 on success, negative error code on failure
+ */
+int power_voltage_get(float &voltage_v);
+
 /**
  * @brief Power source provider enumeration
  *

@@ -27,6 +27,7 @@
 static ssd1306 m_library(CONFIG_UI_DISPLAY_WIDTH, CONFIG_UI_DISPLAY_HEIGHT);
 static uint8_t m_buffer[CONFIG_UI_DISPLAY_WIDTH * CONFIG_UI_DISPLAY_HEIGHT / 8];
 static uint32_t m_timestamp;
+static uint32_t m_tip_resistance_result_timestamp;
 static enum {
     STATE_SPLASH_0,
     STATE_SPLASH_1,
@@ -41,6 +42,7 @@ static enum {
     STATE_MONITOR_HEATING,
     STATE_MONITOR_ASLEEP,
     STATE_MONITOR_ADJUST,
+    STATE_TIP_RESISTANCE_RESULT,
     STATE_MENU_HOME,
     STATE_MENU_INTERFACE_UNITS_0,
     STATE_MENU_INTERFACE_UNITS_1,
@@ -54,6 +56,8 @@ static enum {
     STATE_MENU_TIP_CURRENT_LIMIT_1,
     STATE_MENU_TIP_SOFT_START_0,
     STATE_MENU_TIP_SOFT_START_1,
+    STATE_MENU_TIP_RESISTANCE_0,
+    STATE_MENU_TIP_RESISTANCE_1,
     STATE_MENU_UPDATE_0,
 } m_sm;
 static float m_heating_current_display_samples[CONFIG_UI_HEATING_CURRENT_AVERAGE_SAMPLE_COUNT];
@@ -61,6 +65,9 @@ static float m_heating_current_display_sum_a;
 static uint8_t m_heating_current_display_sample_index;
 static uint8_t m_heating_current_display_sample_count;
 static uint32_t m_heating_current_display_sample_timestamp;
+static float m_tip_resistance_result_ohms;
+static bool m_tip_resistance_result_default;
+static bool m_tip_resistance_result_pending;
 
 /**
  * @brief Clears the rolling average used for the heating-screen current display.
@@ -167,8 +174,20 @@ int interface_setup(void) {
         log_e("Failed to detect display panel!");
         return -ERROR_PERIPHERAL_NOT_DETECTED;
     }
+    m_library.cp437(true);
 
     /* Return success */
+    return 0;
+}
+
+int interface_tip_resistance_result_show(const float resistance_ohms, const bool use_default) {
+    if (m_sm == STATE_TIP_RESISTANCE_RESULT) {
+        return 0;
+    }
+
+    m_tip_resistance_result_ohms = resistance_ohms;
+    m_tip_resistance_result_default = use_default;
+    m_tip_resistance_result_pending = true;
     return 0;
 }
 
@@ -240,6 +259,17 @@ int interface_task(void) {
     }
 
     /* Handle user interface */
+    if ((m_tip_resistance_result_pending == true) &&
+        ((m_sm == STATE_MONITOR_REDIRECT) ||
+         (m_sm == STATE_MONITOR_LOCKED) ||
+         (m_sm == STATE_MONITOR_HEATING) ||
+         (m_sm == STATE_MONITOR_ASLEEP) ||
+         (m_sm == STATE_MONITOR_ADJUST))) {
+        m_tip_resistance_result_pending = false;
+        m_tip_resistance_result_timestamp = millis();
+        m_sm = STATE_TIP_RESISTANCE_RESULT;
+    }
+
     switch (m_sm) {
 
         case STATE_SPLASH_0: {
@@ -386,7 +416,13 @@ int interface_task(void) {
             }
 
             /* Move on */
-            m_sm = STATE_MONITOR_REDIRECT;
+            if (m_tip_resistance_result_pending == true) {
+                m_tip_resistance_result_pending = false;
+                m_tip_resistance_result_timestamp = millis();
+                m_sm = STATE_TIP_RESISTANCE_RESULT;
+            } else {
+                m_sm = STATE_MONITOR_REDIRECT;
+            }
             break;
         }
 
@@ -412,6 +448,34 @@ int interface_task(void) {
                     m_sm = STATE_SPLASH_0;
                     return -ERROR_GENERIC_STATE_UNEXPECTED;
                 }
+            }
+            break;
+        }
+
+        case STATE_TIP_RESISTANCE_RESULT: {
+
+            /* Display the tip resistance and whether the default was used. */
+            m_library.clear();
+            m_library.setTextSize(1);
+            m_library.setCursor(0, 0);
+            m_library.print("Tip resist.");
+            m_library.setCursor(0, 9);
+            m_library.printf("%.1f", m_tip_resistance_result_ohms);
+            m_library.write(0xEA);
+            float result_offset_ohms = CONFIG_TIP_RESISTANCE_OFFSET_INVALID_OHMS;
+            const bool result_offset_configured = settings_heating_tip_resistance_offset_get(result_offset_ohms) == 1;
+            if ((m_tip_resistance_result_default != false) || (result_offset_configured != true)) {
+                m_library.printf(" (def)");
+            } else {
+                m_library.printf(" (%+.1f", result_offset_ohms);
+                m_library.write(0xEA);
+                m_library.write(')');
+            }
+            
+            m_library.display();
+
+            if ((millis() - m_tip_resistance_result_timestamp) >= 2000) {
+                m_sm = STATE_MONITOR_REDIRECT;
             }
             break;
         }
@@ -1104,7 +1168,7 @@ int interface_task(void) {
             m_library.setCursor(20, 0);
             m_library.print("Settings");
             m_library.setCursor(20, 9);
-            m_library.print("Current limit");
+            m_library.print("Current lim.");
             m_library.display();
 
             /* Handle buttons */
@@ -1200,7 +1264,7 @@ int interface_task(void) {
                     break;
                 }
                 case BUTTONS_EVENT_RIGHT_SHORT: {
-                    m_sm = STATE_MENU_UPDATE_0;
+                    m_sm = STATE_MENU_TIP_RESISTANCE_0;
                     break;
                 }
                 case BUTTONS_EVENT_BOTH_SHORT: {
@@ -1262,6 +1326,110 @@ int interface_task(void) {
             break;
         }
 
+        case STATE_MENU_TIP_RESISTANCE_0: {
+
+            /* Display menu page */
+            m_library.clear();
+            m_library.drawBitmap(0, 0, k_icon_settings.data, k_icon_settings.width, k_icon_settings.height, 1);
+            m_library.setTextSize(1);
+            m_library.setCursor(20, 0);
+            m_library.print("Settings");
+            m_library.setCursor(20, 9);
+            m_library.print("Tip resist.");
+            m_library.display();
+
+            /* Handle buttons */
+            switch (buttons_event_get()) {
+                case BUTTONS_EVENT_LEFT_SHORT: {
+                    m_sm = STATE_MENU_TIP_SOFT_START_0;
+                    break;
+                }
+                case BUTTONS_EVENT_RIGHT_SHORT: {
+                    m_sm = STATE_MENU_UPDATE_0;
+                    break;
+                }
+                case BUTTONS_EVENT_BOTH_SHORT: {
+                    m_sm = STATE_MENU_TIP_RESISTANCE_1;
+                    break;
+                }
+                case BUTTONS_EVENT_BOTH_LONG: {
+                    m_sm = STATE_MONITOR_REDIRECT;
+                    break;
+                }
+                default: {
+                    break;
+                }
+            }
+            break;
+        }
+
+        case STATE_MENU_TIP_RESISTANCE_1: {
+
+            float resistance_ohms = 0.0f;
+            power_tip_resistance_get(resistance_ohms);
+            float offset_ohms = CONFIG_TIP_RESISTANCE_OFFSET_INVALID_OHMS;
+            bool offset_configured = settings_heating_tip_resistance_offset_get(offset_ohms) == 1;
+            int offset_tenths = offset_configured ? (int)(offset_ohms * 10.0f + ((offset_ohms < 0.0f) ? -0.5f : 0.5f)) : 0;
+
+            /* Display the currently used tip resistance */
+            m_library.clear();
+            m_library.drawBitmap(0, 0, k_icon_settings.data, k_icon_settings.width, k_icon_settings.height, 1);
+            m_library.setTextSize(1);
+            m_library.setCursor(20, 0);
+            m_library.print("Tip resist.");
+            m_library.setCursor(20, 9);
+            m_library.printf("%.1f", resistance_ohms);
+            m_library.write(0xEA);
+            if (offset_configured != true) {
+                m_library.printf(" (def)");
+            } else {
+                m_library.printf(" (%+.1f", offset_ohms);
+                m_library.write(0xEA);
+                m_library.write(')');
+            }
+            m_library.display();
+
+            /* Handle buttons */
+            switch (buttons_event_get()) {
+                case BUTTONS_EVENT_LEFT_SHORT: {
+                    if (offset_configured != true) {
+                        offset_tenths = 0;
+                    }
+                    if (offset_tenths > CONFIG_TIP_RESISTANCE_OFFSET_MIN_TENTHS) {
+                        offset_tenths--;
+                        if (settings_heating_tip_resistance_offset_set(offset_tenths / 10.0f) == 0) {
+                            power_tip_resistance_offset_apply();
+                        }
+                    }
+                    break;
+                }
+                case BUTTONS_EVENT_RIGHT_SHORT: {
+                    if (offset_configured != true) {
+                        offset_tenths = 0;
+                    }
+                    if (offset_tenths < CONFIG_TIP_RESISTANCE_OFFSET_MAX_TENTHS) {
+                        offset_tenths++;
+                        if (settings_heating_tip_resistance_offset_set(offset_tenths / 10.0f) == 0) {
+                            power_tip_resistance_offset_apply();
+                        }
+                    }
+                    break;
+                }
+                case BUTTONS_EVENT_BOTH_SHORT: {
+                    m_sm = STATE_MENU_TIP_RESISTANCE_0;
+                    break;
+                }
+                case BUTTONS_EVENT_BOTH_LONG: {
+                    m_sm = STATE_MONITOR_REDIRECT;
+                    break;
+                }
+                default: {
+                    break;
+                }
+            }
+            break;
+        }
+
         case STATE_MENU_UPDATE_0: {
 
             /* Display menu page */
@@ -1277,7 +1445,7 @@ int interface_task(void) {
             /* Handle buttons */
             switch (buttons_event_get()) {
                 case BUTTONS_EVENT_LEFT_SHORT: {
-                    m_sm = STATE_MENU_TIP_SOFT_START_0;
+                    m_sm = STATE_MENU_TIP_RESISTANCE_0;
                     break;
                 }
                 case BUTTONS_EVENT_RIGHT_SHORT: {
