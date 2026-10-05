@@ -235,6 +235,45 @@ int power_heating_current_limit_apply(const float current_a, const float current
     return 0;
 }
 
+int power_heating_current_limit_ramp_apply(const float current_limit_a, float &applied_current_limit_a) {
+    float input_voltage_v = 0.0f;
+    if ((power_voltage_get(input_voltage_v) < 0) || (input_voltage_v <= 0.0f) ||
+        (m_tip_resistance_ohms <= 0.0f)) {
+        return -1;
+    }
+
+    const float requested_buck_voltage = (current_limit_a > 0.0f)
+        ? sqrt(current_limit_a * input_voltage_v * CONFIG_TIP_BUCK_EFFICIENCY * m_tip_resistance_ohms)
+        : 0.0f;
+    const float minimum_buck_voltage = m_dac_output_voltage_compute(3.3f);
+    const float maximum_buck_voltage = m_dac_output_voltage_compute(0.0f);
+    const float target_buck_voltage = (requested_buck_voltage < minimum_buck_voltage)
+        ? minimum_buck_voltage
+        : ((requested_buck_voltage > maximum_buck_voltage) ? maximum_buck_voltage : requested_buck_voltage);
+
+    float target_vdac = 3.3f;
+    for (uint16_t i = 0; i < 256; i++) {
+        const float vdac = 3.3f * (i / 255.0f);
+        if (m_dac_output_voltage_compute(vdac) <= target_buck_voltage) {
+            target_vdac = vdac;
+            break;
+        }
+    }
+
+    const float applied_buck_voltage = m_dac_output_voltage_compute(target_vdac);
+    applied_current_limit_a = (applied_buck_voltage * applied_buck_voltage) /
+        (CONFIG_TIP_BUCK_EFFICIENCY * m_tip_resistance_ohms * input_voltage_v);
+
+    const int res = m_dac.output_voltage_set(target_vdac);
+    if (res < 0) {
+        log_w("Failed to set soft-start DAC voltage to %.2fV", target_vdac);
+        return res;
+    }
+
+    m_dac_voltage_v = target_vdac;
+    return 0;
+}
+
 /**
  * @brief Reads the bus voltage from the INA219 power monitor.
  *

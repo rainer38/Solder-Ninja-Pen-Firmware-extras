@@ -104,6 +104,14 @@ int power_tip_resistance_measure_cancel(void);
  */
 int power_heating_current_limit_apply(const float current_a, const float current_limit_a);
 
+/**
+ * @brief Sets the buck output for a requested USB input-current limit.
+ * @param[in] current_limit_a Requested USB input-current limit in amperes
+ * @param[out] applied_current_limit_a Achievable limit after DAC quantization and range limits
+ * @return 0 on success, negative error code otherwise
+ */
+int power_heating_current_limit_ramp_apply(const float current_limit_a, float &applied_current_limit_a);
+
 /** * @brief Reads the bus voltage feeding the power path.
  *
  * @param[out] voltage_v Voltage in volts

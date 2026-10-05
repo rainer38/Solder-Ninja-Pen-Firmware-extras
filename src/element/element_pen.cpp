@@ -46,9 +46,24 @@ static uint32_t m_timestamp_pid_computed;
 static uint32_t m_heating_duration;
 static float m_cycle_current_limit_a;
 static uint32_t m_timestamp_heating_start;
+static bool m_soft_start_ramp_active;
+static bool m_soft_start_session_initialized;
+static bool m_soft_start_dac_initialized;
+
+static uint32_t m_soft_start_duration_get(void) {
+    uint32_t duration_ms = CONFIG_TIP_SOFT_START_DURATION;
+    settings_heating_soft_start_duration_get(duration_ms);
+    return duration_ms;
+}
+
+static void m_soft_start_session_reset(void) {
+    m_soft_start_ramp_active = false;
+    m_soft_start_session_initialized = false;
+    m_soft_start_dac_initialized = false;
+}
 
 /**
- * @brief Computes the soft-started current limit for the current heating pulse.
+ * @brief Computes the soft-started current limit for the active heating session.
  *
  * Ramps linearly from zero up to the full negotiated limit over
  * CONFIG_TIP_SOFT_START_DURATION, to avoid an inrush current
@@ -59,8 +74,7 @@ static uint32_t m_timestamp_heating_start;
  */
 static float m_soft_start_current_limit_get(const float current_limit_a) {
     uint32_t elapsed = millis() - m_timestamp_heating_start;
-    uint32_t duration_ms = CONFIG_TIP_SOFT_START_DURATION;
-    settings_heating_soft_start_duration_get(duration_ms);
+    uint32_t duration_ms = m_soft_start_duration_get();
     if ((duration_ms == 0) || (elapsed >= duration_ms)) {
         return current_limit_a;
     }
@@ -164,6 +178,7 @@ int element_heating_enable(void) {
  */
 int element_heating_disable(void) {
     m_heating_enabled = false;
+    m_soft_start_session_reset();
     return 0;
 }
 
@@ -190,6 +205,7 @@ int element_task(void) {
         case STATE_0_DISCONNECTED: {
 
             power_tip_resistance_measure_cancel();
+            m_soft_start_session_reset();
             m_tip_resistance_calibrated = false;
 
             /* Ensure pid is disabled */
@@ -376,6 +392,13 @@ int element_task(void) {
                 break;
             }
 
+            if (m_soft_start_session_initialized != true) {
+                m_timestamp_heating_start = millis();
+                m_soft_start_ramp_active = (m_soft_start_duration_get() > 0);
+                m_soft_start_dac_initialized = false;
+                m_soft_start_session_initialized = true;
+            }
+
             res = power_heating_current_limit_configure();
             if (res < 0) {
                 log_w("Failed to apply heating current limit before heating");
@@ -395,6 +418,16 @@ int element_task(void) {
                 break;
             }
             m_cycle_current_limit_a = current_limit_a;
+
+            if ((m_soft_start_ramp_active == true) && (m_soft_start_dac_initialized != true)) {
+                float applied_current_limit_a = 0.0f;
+                res = power_heating_current_limit_ramp_apply(0.0f, applied_current_limit_a);
+                if (res < 0) {
+                    log_w("Failed to initialize soft-start DAC output");
+                    break;
+                }
+                m_soft_start_dac_initialized = true;
+            }
 
             /* Read actual current and trim the DC-DC output voltage if it exceeds the configured limit. */
             float current_a = 0.0f;
@@ -454,7 +487,6 @@ int element_task(void) {
             }
 
             /* Turn on dc-dc */
-            m_timestamp_heating_start = millis();
             power_enabled_set(true);
 
             /* Move on */
@@ -476,23 +508,40 @@ int element_task(void) {
                 m_temperature_filter_last_addition = millis();
             }
 
-            /* Use the current limit that was already determined for this heating cycle.
+            /* Use the current limit that was already determined for this heating session.
              * It is stable throughout the whole heating pulse, so repeated negotiation calls are unnecessary.
              * However, it is soft-started from zero up to its full value to avoid an
              * inrush current spike whenever heating (re)starts. */
+            float soft_start_current_limit_a = m_soft_start_current_limit_get(m_cycle_current_limit_a);
+            if (m_soft_start_ramp_active) {
+                float applied_current_limit_a = 0.0f;
+                res = power_heating_current_limit_ramp_apply(soft_start_current_limit_a, applied_current_limit_a);
+                if (res < 0) {
+                    power_enabled_set(false);
+                    m_soft_start_session_reset();
+                    m_sm = STATE_3_START;
+                    break;
+                }
+                soft_start_current_limit_a = applied_current_limit_a;
+                if ((millis() - m_timestamp_heating_start) >= m_soft_start_duration_get()) {
+                    m_soft_start_ramp_active = false;
+                }
+            }
+
             float current_a = 0.0f;
             res = power_current_get(current_a);
             if (res < 0) {
                 power_enabled_set(false);
+                m_soft_start_session_reset();
                 m_sm = STATE_3_START;
                 break;
             }
-            float soft_start_current_limit_a = m_soft_start_current_limit_get(m_cycle_current_limit_a);
             if (current_a > soft_start_current_limit_a) {
                 log_w("USB current limit exceeded while heating: %.2fA > %.2fA, adjusting buck output", current_a, soft_start_current_limit_a);
                 res = power_heating_current_limit_apply(current_a, soft_start_current_limit_a);
                 if (res < 0) {
                     power_enabled_set(false);
+                    m_soft_start_session_reset();
                     m_sm = STATE_3_START;
                     break;
                 }
@@ -500,6 +549,7 @@ int element_task(void) {
                 m_heating_duration = (m_heating_duration > 0.0f) ? (m_heating_duration * reduction_factor) : 0.0f;
                 if (m_heating_duration <= 0.0f) {
                     power_enabled_set(false);
+                    m_soft_start_session_reset();
                     m_sm = STATE_3_START;
                     break;
                 }
