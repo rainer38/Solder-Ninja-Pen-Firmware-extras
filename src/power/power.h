@@ -110,7 +110,7 @@ int power_heating_current_limit_apply(const float current_a, const float current
  * @param[out] applied_current_limit_a Achievable limit after DAC quantization and range limits
  * @return 0 on success, negative error code otherwise
  */
-int power_heating_current_limit_ramp_apply(const float current_limit_a, float &applied_current_limit_a);
+int power_heating_current_limit_ramp_apply(const float current_limit_a, float &applied_current_limit_a, bool &minimum_voltage_reached);
 
 /** * @brief Reads the bus voltage feeding the power path.
  *

@@ -393,10 +393,9 @@ int element_task(void) {
             }
 
             if (m_soft_start_session_initialized != true) {
-                m_timestamp_heating_start = millis();
-                m_soft_start_ramp_active = (m_soft_start_duration_get() > 0);
-                m_soft_start_dac_initialized = false;
-                m_soft_start_session_initialized = true;
+                if (m_soft_start_dac_initialized != true) {
+                    m_soft_start_ramp_active = (m_soft_start_duration_get() > 0);
+                }
             }
 
             res = power_heating_current_limit_configure();
@@ -421,7 +420,8 @@ int element_task(void) {
 
             if ((m_soft_start_ramp_active == true) && (m_soft_start_dac_initialized != true)) {
                 float applied_current_limit_a = 0.0f;
-                res = power_heating_current_limit_ramp_apply(0.0f, applied_current_limit_a);
+                bool minimum_voltage_reached = false;
+                res = power_heating_current_limit_ramp_apply(0.0f, applied_current_limit_a, minimum_voltage_reached);
                 if (res < 0) {
                     log_w("Failed to initialize soft-start DAC output");
                     break;
@@ -487,6 +487,10 @@ int element_task(void) {
             }
 
             /* Turn on dc-dc */
+            if (m_soft_start_session_initialized != true) {
+                m_timestamp_heating_start = millis();
+                m_soft_start_session_initialized = true;
+            }
             power_enabled_set(true);
 
             /* Move on */
@@ -513,9 +517,10 @@ int element_task(void) {
              * However, it is soft-started from zero up to its full value to avoid an
              * inrush current spike whenever heating (re)starts. */
             float soft_start_current_limit_a = m_soft_start_current_limit_get(m_cycle_current_limit_a);
+            bool minimum_voltage_reached = false;
             if (m_soft_start_ramp_active) {
                 float applied_current_limit_a = 0.0f;
-                res = power_heating_current_limit_ramp_apply(soft_start_current_limit_a, applied_current_limit_a);
+                res = power_heating_current_limit_ramp_apply(soft_start_current_limit_a, applied_current_limit_a, minimum_voltage_reached);
                 if (res < 0) {
                     power_enabled_set(false);
                     m_soft_start_session_reset();
@@ -536,7 +541,9 @@ int element_task(void) {
                 m_sm = STATE_3_START;
                 break;
             }
-            if (current_a > soft_start_current_limit_a) {
+            const bool below_reachable_ramp_floor = m_soft_start_ramp_active && minimum_voltage_reached &&
+                (current_a <= m_cycle_current_limit_a);
+            if ((current_a > soft_start_current_limit_a) && (below_reachable_ramp_floor != true)) {
                 log_w("USB current limit exceeded while heating: %.2fA > %.2fA, adjusting buck output", current_a, soft_start_current_limit_a);
                 res = power_heating_current_limit_apply(current_a, soft_start_current_limit_a);
                 if (res < 0) {

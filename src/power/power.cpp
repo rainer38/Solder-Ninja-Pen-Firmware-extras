@@ -235,7 +235,7 @@ int power_heating_current_limit_apply(const float current_a, const float current
     return 0;
 }
 
-int power_heating_current_limit_ramp_apply(const float current_limit_a, float &applied_current_limit_a) {
+int power_heating_current_limit_ramp_apply(const float current_limit_a, float &applied_current_limit_a, bool &minimum_voltage_reached) {
     float input_voltage_v = 0.0f;
     if ((power_voltage_get(input_voltage_v) < 0) || (input_voltage_v <= 0.0f) ||
         (m_tip_resistance_ohms <= 0.0f)) {
@@ -247,6 +247,7 @@ int power_heating_current_limit_ramp_apply(const float current_limit_a, float &a
         : 0.0f;
     const float minimum_buck_voltage = m_dac_output_voltage_compute(3.3f);
     const float maximum_buck_voltage = m_dac_output_voltage_compute(0.0f);
+    minimum_voltage_reached = (requested_buck_voltage <= minimum_buck_voltage);
     const float target_buck_voltage = (requested_buck_voltage < minimum_buck_voltage)
         ? minimum_buck_voltage
         : ((requested_buck_voltage > maximum_buck_voltage) ? maximum_buck_voltage : requested_buck_voltage);
