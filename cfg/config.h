@@ -27,12 +27,12 @@
 #define CONFIG_TIP_RESISTANCE_DEFAULT_OHMS 2.1f  //!< Default tip resistance used when measurement is unavailable or invalid.
 #define CONFIG_TIP_RESISTANCE_ALTERNATIVE_OHMS 1.6f  //!< Alternative nominal tip resistance selected by the resistance measurement.
 #define CONFIG_TIP_RESISTANCE_CLASSIFICATION_THRESHOLD_OHMS 1.85f  //!< Resistance boundary used to distinguish 1.6 Ω and 2.1 Ω tips.
-#define CONFIG_TIP_RESISTANCE_MEASUREMENT_MIN_VALID_OHMS 1.3f  //!< Minimum valid measured tip resistance (ohms).
-#define CONFIG_TIP_RESISTANCE_MEASUREMENT_MAX_VALID_OHMS 2.8f  //!< Maximum valid measured tip resistance (ohms).
+#define CONFIG_TIP_RESISTANCE_MEASUREMENT_MIN_VALID_OHMS 1.0f  //!< Minimum valid measured tip resistance (ohms).
+#define CONFIG_TIP_RESISTANCE_MEASUREMENT_MAX_VALID_OHMS 3.0f  //!< Maximum valid measured tip resistance (ohms).
 #define CONFIG_TIP_RESISTANCE_OFFSET_DEFAULT_OHMS 0.0f  //!< Default user-configurable resistance offset (ohms).
 #define CONFIG_TIP_RESISTANCE_OFFSET_INVALID_OHMS -999.0f  //!< Sentinel for an unset or invalid stored resistance offset.
-#define CONFIG_TIP_RESISTANCE_OFFSET_MIN_TENTHS -10  //!< Minimum resistance offset in tenths of an ohm.
-#define CONFIG_TIP_RESISTANCE_OFFSET_MAX_TENTHS 10  //!< Maximum resistance offset in tenths of an ohm.
+#define CONFIG_TIP_RESISTANCE_OFFSET_MIN_TENTHS -15  //!< Minimum resistance offset in tenths of an ohm.
+#define CONFIG_TIP_RESISTANCE_OFFSET_MAX_TENTHS 15  //!< Maximum resistance offset in tenths of an ohm.
 #define CONFIG_TIP_RESISTANCE_MEASUREMENT_SETTLE_TIME 25  //!< Time to wait for current to stabilize before sampling (milliseconds).
 #define CONFIG_TIP_RESISTANCE_MEASUREMENT_SAMPLE_PERIOD 5  //!< Interval between resistance probe samples (milliseconds).
 #define CONFIG_TIP_RESISTANCE_MEASUREMENT_SAMPLE_COUNT 8  //!< Number of samples used to average the resistance probe.
