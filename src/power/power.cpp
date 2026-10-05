@@ -82,6 +82,50 @@ static float m_dac_output_voltage_compute(const float vdac) {
     return vref * (1.0f + rtop / rbot) + (vref - vdac) * (rtop / rdac);
 }
 
+/**
+ * @brief DAC setting selected for a requested buck output voltage.
+ */
+struct buck_dac_setting {
+    float dac_voltage_v;          //!< Quantized DAC output voltage in volts.
+    float buck_voltage_v;         //!< Modeled buck output at the selected DAC code, in volts.
+    bool minimum_voltage_reached;  //!< True when code 255 is required to reach the target.
+};
+
+/**
+ * @brief Maps a requested buck voltage to the nearest DAC code that does not exceed it.
+ *
+ * The DAC transfer function is inverse and has a finite 8-bit range, so the
+ * returned buck voltage is the modeled, quantized output rather than the request.
+ *
+ * @param[in] requested_buck_voltage_v Requested buck output voltage in volts
+ * @return Selected DAC voltage, modeled buck voltage, and minimum-range status
+ */
+static struct buck_dac_setting m_buck_dac_setting_compute(const float requested_buck_voltage_v) {
+    const float minimum_buck_voltage_v = m_dac_output_voltage_compute(3.3f);
+    const float maximum_buck_voltage_v = m_dac_output_voltage_compute(0.0f);
+    const float target_buck_voltage_v = (requested_buck_voltage_v < minimum_buck_voltage_v)
+        ? minimum_buck_voltage_v
+        : ((requested_buck_voltage_v > maximum_buck_voltage_v) ? maximum_buck_voltage_v : requested_buck_voltage_v);
+
+    struct buck_dac_setting setting = {};
+    for (uint16_t code = 0; code < 256; code++) {
+        const float vdac = 3.3f * (code / 255.0f);
+        const float vout = m_dac_output_voltage_compute(vdac);
+        if ((vout <= target_buck_voltage_v) || (code == 255)) {
+            setting.dac_voltage_v = vdac;
+            setting.buck_voltage_v = vout;
+            setting.minimum_voltage_reached = (code == 255);
+            return setting;
+        }
+    }
+
+    return setting;
+}
+
+/**
+ * @brief Gets the user-configured heating current-limit factor.
+ * @return Factor in the range 0.1 to 1.0, or the configured default
+ */
 static float m_heating_current_limit_factor_get(void) {
     float factor = CONFIG_TIP_CURRENT_LIMIT_FACTOR;
     settings_heating_current_limit_factor_get(factor);
@@ -114,41 +158,21 @@ static int m_adjust_buck(const float power_limit) {
     * Where R is the detected tip resistance and efficiency is considered */
     float buck_voltage = sqrt((limited_power * CONFIG_TIP_BUCK_EFFICIENCY) * m_tip_resistance_ohms);
     log_d("Using buck voltage of %.2fV.", buck_voltage);
-    const float buck_voltage_min = m_dac_output_voltage_compute(3.3f);
-    if (buck_voltage < buck_voltage_min) {
-        log_w("Requested buck voltage %.2fV is below the modeled DAC range (minimum %.2fV)", buck_voltage, buck_voltage_min);
+    const struct buck_dac_setting setting = m_buck_dac_setting_compute(buck_voltage);
+    if (setting.minimum_voltage_reached && (buck_voltage < setting.buck_voltage_v)) {
+        log_w("Requested buck voltage %.2fV is below the modeled DAC range (minimum %.2fV)", buck_voltage, setting.buck_voltage_v);
     }
 
-    /* Configure DAC5311 to set the buck converter output voltage
-     * Using iterative approach to find optimal DAC setting
-     * @note This could be optimized with direct calculation:
-     * Vdac = (Vref * (1 + Rtop/Rbot + Rtop/Rdac) - Vout_target) * (Rdac/Rtop)
-     * DAC_code = (Vdac / 3.3V) * 255 */
-    for (uint16_t i = 0; i < 256; i++) {
-        float vdac = 3.3 * (i / 255.00);
-        float vout = m_dac_output_voltage_compute(vdac);
-
-        /* Check if this DAC setting produces the desired output voltage */
-        if ((vout <= buck_voltage) || (i == 255)) {
-
-            /* Update dac */
-            log_d("Using vdac %.2fV for vout %.2fV.", vdac, vout);
-            int res = m_dac.output_voltage_set(vdac);
-            if (res < 0) {
-                log_e("Failed to configure DAC!");
-                return -1;
-            }
-
-            m_dac_voltage_v = vdac;
-            m_buck_current_limit_factor_applied = m_heating_current_limit_factor_get();
-
-            /* Return success */
-            return 0;
-        }
+    log_d("Using vdac %.2fV for vout %.2fV.", setting.dac_voltage_v, setting.buck_voltage_v);
+    const int res = m_dac.output_voltage_set(setting.dac_voltage_v);
+    if (res < 0) {
+        log_e("Failed to configure DAC!");
+        return -1;
     }
 
-    /* Return failure */
-    return -1;
+    m_dac_voltage_v = setting.dac_voltage_v;
+    m_buck_current_limit_factor_applied = m_heating_current_limit_factor_get();
+    return 0;
 }
 
 /**
@@ -161,9 +185,9 @@ static int m_adjust_buck(const float power_limit) {
  */
 int power_current_get(float &current_a) {
     /*
-     * The INA219 reports the shunt voltage in millivolts. For a 16 mΩ shunt,
-     * the current is simply Vshunt_mV / 16, because:
-     *  I = V / R = (V_mV / 1000) / 0.016 = V_mV / 16
+    * The INA219 reports the shunt voltage in millivolts. For the configured
+    * shunt value, current is Vshunt_mV / Rshunt_milliohms, because:
+    *  I = (Vshunt_mV / 1000) / (Rshunt_milliohms / 1000)
      * This avoids an unnecessary extra conversion and matches the actual hardware.
      */
     current_a = m_ina219.getShuntVoltage_mV() / CONFIG_TIP_SHUNT_MILLIOHMS;
@@ -171,15 +195,16 @@ int power_current_get(float &current_a) {
 }
 
 /**
- * @brief Reduce the DC-DC output voltage step by step to stay within the configured USB current budget.
+ * @brief Reduces buck output in response to measured USB input overcurrent.
  *
- * For a resistive tip, output power is proportional to the square of buck voltage.
- * With approximately constant input voltage and converter efficiency, the input current
- * follows the same power ratio. The inverse DAC transfer function is used to lower Vout.
+ * For a resistive tip, output power is proportional to buck voltage squared. The
+ * measured current ratio estimates the required buck voltage, and the DAC is moved
+ * in the inverse direction needed to lower that output. Corrections are step-limited.
  *
  * @param[in] current_a Measured current in amperes
  * @param[in] current_limit_a Maximum allowed current in amperes
- * @return 0 on success, negative error code otherwise
+ * @return 0 if no correction is needed or the correction succeeds; negative if
+ *         the DAC write fails or current remains over limit at maximum DAC output
  */
 int power_heating_current_limit_apply(const float current_a, const float current_limit_a) {
     if ((current_a <= 0.0f) || (current_limit_a <= 0.0f)) {
@@ -203,38 +228,45 @@ int power_heating_current_limit_apply(const float current_a, const float current
         ? current_buck_voltage * sqrt(current_limit_a / current_a)
         : 0.0f;
 
-    /* The DAC transfer function is inverse: increasing Vdac lowers buck output voltage. */
-    float target_vdac = 3.3f;
-    for (uint16_t i = 0; i < 256; i++) {
-        const float vdac = 3.3f * (i / 255.0f);
-        if (m_dac_output_voltage_compute(vdac) <= target_buck_voltage) {
-            target_vdac = vdac;
-            break;
-        }
-    }
+    /* The shared mapping handles the inverse DAC transfer function. */
+    struct buck_dac_setting setting = m_buck_dac_setting_compute(target_buck_voltage);
 
-    if (target_vdac < m_dac_voltage_v) {
-        target_vdac = m_dac_voltage_v;
+    if (setting.dac_voltage_v < m_dac_voltage_v) {
+        setting.dac_voltage_v = m_dac_voltage_v;
     }
 
     /* Limit each correction step while moving in the direction that reduces buck output. */
     const float voltage_step_v = 0.05f;
-    if ((target_vdac - m_dac_voltage_v) > voltage_step_v) {
-        target_vdac = m_dac_voltage_v + voltage_step_v;
+    if ((setting.dac_voltage_v - m_dac_voltage_v) > voltage_step_v) {
+        setting.dac_voltage_v = m_dac_voltage_v + voltage_step_v;
     }
 
     /* Update the DAC to reduce the buck output voltage. */
-    int res = m_dac.output_voltage_set(target_vdac);
+    int res = m_dac.output_voltage_set(setting.dac_voltage_v);
     if (res < 0) {
-        log_w("Failed to increase DAC voltage to %.2fV while current was %.2fA > %.2fA", target_vdac, current_a, current_limit_a);
+        log_w("Failed to increase DAC voltage to %.2fV while current was %.2fA > %.2fA", setting.dac_voltage_v, current_a, current_limit_a);
         return res;
     }
 
-    m_dac_voltage_v = target_vdac;
-    log_w("Increased DAC voltage to %.2fV toward %.2fA current limit (measured %.2fA)", target_vdac, current_limit_a, current_a);
+    m_dac_voltage_v = setting.dac_voltage_v;
+    log_w("Increased DAC voltage to %.2fV toward %.2fA current limit (measured %.2fA)", setting.dac_voltage_v, current_limit_a, current_a);
     return 0;
 }
 
+/**
+ * @brief Sets the buck output corresponding to a requested USB input-current limit.
+ *
+ * The requested current is converted to a buck voltage using the measured USB bus
+ * voltage, configured efficiency, and active tip resistance, then quantized through
+ * the shared DAC mapping.
+ *
+ * @param[in] current_limit_a Requested USB input-current limit in amperes; zero
+ *            selects the minimum buck output
+ * @param[out] applied_current_limit_a Modeled current limit after DAC quantization
+ * @param[out] minimum_voltage_reached True when the maximum DAC code (255) was
+ *             needed to reach the requested buck voltage
+ * @return 0 on success, negative if input voltage/resistance is invalid or the DAC write fails
+ */
 int power_heating_current_limit_ramp_apply(const float current_limit_a, float &applied_current_limit_a, bool &minimum_voltage_reached) {
     float input_voltage_v = 0.0f;
     if ((power_voltage_get(input_voltage_v) < 0) || (input_voltage_v <= 0.0f) ||
@@ -245,33 +277,18 @@ int power_heating_current_limit_ramp_apply(const float current_limit_a, float &a
     const float requested_buck_voltage = (current_limit_a > 0.0f)
         ? sqrt(current_limit_a * input_voltage_v * CONFIG_TIP_BUCK_EFFICIENCY * m_tip_resistance_ohms)
         : 0.0f;
-    const float minimum_buck_voltage = m_dac_output_voltage_compute(3.3f);
-    const float maximum_buck_voltage = m_dac_output_voltage_compute(0.0f);
-    minimum_voltage_reached = (requested_buck_voltage <= minimum_buck_voltage);
-    const float target_buck_voltage = (requested_buck_voltage < minimum_buck_voltage)
-        ? minimum_buck_voltage
-        : ((requested_buck_voltage > maximum_buck_voltage) ? maximum_buck_voltage : requested_buck_voltage);
-
-    float target_vdac = 3.3f;
-    for (uint16_t i = 0; i < 256; i++) {
-        const float vdac = 3.3f * (i / 255.0f);
-        if (m_dac_output_voltage_compute(vdac) <= target_buck_voltage) {
-            target_vdac = vdac;
-            break;
-        }
-    }
-
-    const float applied_buck_voltage = m_dac_output_voltage_compute(target_vdac);
-    applied_current_limit_a = (applied_buck_voltage * applied_buck_voltage) /
+    const struct buck_dac_setting setting = m_buck_dac_setting_compute(requested_buck_voltage);
+    minimum_voltage_reached = setting.minimum_voltage_reached;
+    applied_current_limit_a = (setting.buck_voltage_v * setting.buck_voltage_v) /
         (CONFIG_TIP_BUCK_EFFICIENCY * m_tip_resistance_ohms * input_voltage_v);
 
-    const int res = m_dac.output_voltage_set(target_vdac);
+    const int res = m_dac.output_voltage_set(setting.dac_voltage_v);
     if (res < 0) {
-        log_w("Failed to set soft-start DAC voltage to %.2fV", target_vdac);
+        log_w("Failed to set soft-start DAC voltage to %.2fV", setting.dac_voltage_v);
         return res;
     }
 
-    m_dac_voltage_v = target_vdac;
+    m_dac_voltage_v = setting.dac_voltage_v;
     return 0;
 }
 
@@ -425,15 +442,14 @@ int power_tip_resistance_offset_apply(void) {
 int power_setup(void) {
     int res;
 
-    /* Initialize INA219 current/voltage monitor for the USB input path.
+    /* Initialize INA219 current/voltage monitor for the DC-DC input path.
      * We intentionally do not use the library's default calibration because this
-     * board has a 0.016 Ω shunt and we calculate current from the measured shunt
-     * voltage to keep the result accurate. */
+     * board's 0.010 Ω shunt is converted directly from measured shunt voltage. */
     if (!m_ina219.begin()) {
         log_e("Failed to setup INA219 current sensor!");
         return -ERROR_PERIPHERAL_SETUP_ERROR;
     }
-    log_i("INA219 current monitor initialized (0.016 Ω shunt).");
+    log_i("INA219 current monitor initialized (%.1f mΩ shunt).", CONFIG_TIP_SHUNT_MILLIOHMS);
 
     /* Initialize USB charger detection IC (PI3USB9281C)
      * This IC detects USB charging capabilities and port types */

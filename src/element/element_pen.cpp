@@ -50,12 +50,19 @@ static bool m_soft_start_ramp_active;
 static bool m_soft_start_session_initialized;
 static bool m_soft_start_dac_initialized;
 
+/**
+ * @brief Gets the configured soft-start duration, falling back to the build default.
+ * @return Ramp duration in milliseconds
+ */
 static uint32_t m_soft_start_duration_get(void) {
     uint32_t duration_ms = CONFIG_TIP_SOFT_START_DURATION;
     settings_heating_soft_start_duration_get(duration_ms);
     return duration_ms;
 }
 
+/**
+ * @brief Clears the soft-start state so the next heating session starts from its initial limit.
+ */
 static void m_soft_start_session_reset(void) {
     m_soft_start_ramp_active = false;
     m_soft_start_session_initialized = false;
@@ -63,7 +70,7 @@ static void m_soft_start_session_reset(void) {
 }
 
 /**
- * @brief Computes the soft-started current limit for the active heating session.
+ * @brief Computes the linearly ramped USB current limit for the active heating session.
  *
  * Ramps linearly from zero up to the full negotiated limit over
  * CONFIG_TIP_SOFT_START_DURATION, to avoid an inrush current

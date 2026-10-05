@@ -37,10 +37,9 @@
 int power_setup(void);
 
 /**
- * @brief Reads the current delivered to the heater path.
+ * @brief Reads current drawn by the DC-DC converter from the USB input path.
  *
- * This function is intended for future tip-heating control loops that need
- * real current feedback from the USB input side.
+ * The INA219 measures the converter input branch, not the current through the tip.
  *
  * @param[out] current_a Current in amperes
  * @return 0 on success, negative error code on failure
@@ -92,27 +91,34 @@ int power_tip_resistance_measure_task(void);
  */
 int power_tip_resistance_measure_cancel(void);
 
-/** * @brief Reduce the DC-DC output voltage step-by-step to approach the configured
- * USB current limit.
+/**
+ * @brief Reduces buck output in response to measured USB input overcurrent.
  *
- * This is used by the heater control loop to approach the 80% limit smoothly
- * instead of dropping the heating phase completely.
+ * Uses the measured current ratio and inverse DAC transfer function to lower
+ * the buck output in bounded steps. Returns an error if the output is already
+ * at its minimum and measured current still exceeds the limit.
  *
  * @param[in] current_a Measured current in amperes
  * @param[in] current_limit_a Maximum allowed current in amperes
- * @return 0 on success, negative error code otherwise
+ * @return 0 if no correction is needed or the correction succeeds; negative on failure
  */
 int power_heating_current_limit_apply(const float current_a, const float current_limit_a);
 
 /**
- * @brief Sets the buck output for a requested USB input-current limit.
+ * @brief Sets the buck output corresponding to a requested USB input-current limit.
+ *
+ * Converts the requested current to a buck voltage and applies the closest
+ * supported DAC code. This is used to create the soft-start current ramp.
+ *
  * @param[in] current_limit_a Requested USB input-current limit in amperes
- * @param[out] applied_current_limit_a Achievable limit after DAC quantization and range limits
+ * @param[out] applied_current_limit_a Modeled limit after DAC quantization and range limits
+ * @param[out] minimum_voltage_reached True when DAC code 255 is selected
  * @return 0 on success, negative error code otherwise
  */
 int power_heating_current_limit_ramp_apply(const float current_limit_a, float &applied_current_limit_a, bool &minimum_voltage_reached);
 
-/** * @brief Reads the bus voltage feeding the power path.
+/**
+ * @brief Reads the bus voltage feeding the DC-DC converter.
  *
  * @param[out] voltage_v Voltage in volts
  * @return 0 on success, negative error code on failure
