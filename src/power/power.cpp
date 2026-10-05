@@ -82,6 +82,14 @@ static float m_dac_output_voltage_compute(const float vdac) {
     return vref * (1.0f + rtop / rbot) + (vref - vdac) * (rtop / rdac);
 }
 
+static float m_heating_current_limit_factor_get(void) {
+    float factor = CONFIG_TIP_CURRENT_LIMIT_FACTOR;
+    settings_heating_current_limit_factor_get(factor);
+    return factor;
+}
+
+static float m_buck_current_limit_factor_applied = -1.0f;
+
 /**
  * @brief Adjusts the buck converter output voltage based on desired power limit
  *
@@ -99,11 +107,17 @@ static float m_dac_output_voltage_compute(const float vdac) {
  */
 static int m_adjust_buck(const float power_limit) {
 
+    const float limited_power = power_limit * m_heating_current_limit_factor_get();
+
     /* Calculate required buck converter output voltage
      * Using power formula: P = V²/R, solving for V = sqrt(P * R)
     * Where R is the detected tip resistance and efficiency is considered */
-    float buck_voltage = sqrt((power_limit * CONFIG_TIP_BUCK_EFFICIENCY) * m_tip_resistance_ohms);
+    float buck_voltage = sqrt((limited_power * CONFIG_TIP_BUCK_EFFICIENCY) * m_tip_resistance_ohms);
     log_d("Using buck voltage of %.2fV.", buck_voltage);
+    const float buck_voltage_min = m_dac_output_voltage_compute(3.3f);
+    if (buck_voltage < buck_voltage_min) {
+        log_w("Requested buck voltage %.2fV is below the modeled DAC range (minimum %.2fV)", buck_voltage, buck_voltage_min);
+    }
 
     /* Configure DAC5311 to set the buck converter output voltage
      * Using iterative approach to find optimal DAC setting
@@ -126,6 +140,7 @@ static int m_adjust_buck(const float power_limit) {
             }
 
             m_dac_voltage_v = vdac;
+            m_buck_current_limit_factor_applied = m_heating_current_limit_factor_get();
 
             /* Return success */
             return 0;
@@ -158,9 +173,9 @@ int power_current_get(float &current_a) {
 /**
  * @brief Reduce the DC-DC output voltage step by step to stay within the configured USB current budget.
  *
- * The current draw of the tip is approximately proportional to the buck output voltage
- * for a resistive load. We therefore estimate the required buck voltage from the current
- * overshoot and move the DAC toward that value instead of disabling heating altogether.
+ * For a resistive tip, output power is proportional to the square of buck voltage.
+ * With approximately constant input voltage and converter efficiency, the input current
+ * follows the same power ratio. The inverse DAC transfer function is used to lower Vout.
  *
  * @param[in] current_a Measured current in amperes
  * @param[in] current_limit_a Maximum allowed current in amperes
@@ -175,30 +190,48 @@ int power_heating_current_limit_apply(const float current_a, const float current
         return 0;
     }
 
-    /* Reduce the output voltage proportionally to the current overshoot. */
-    float target_vdac = m_dac_voltage_v * (current_limit_a / current_a);
-    if (target_vdac < 0.0f) {
-        target_vdac = 0.0f;
-    }
-    if (target_vdac > 3.3f) {
-        target_vdac = 3.3f;
+    const float dac_max_voltage = 3.3f;
+    const float dac_resolution_v = dac_max_voltage / 255.0f;
+    if (m_dac_voltage_v >= (dac_max_voltage - dac_resolution_v)) {
+        log_e("Current %.2fA remains above %.2fA with DAC at maximum; heating cannot meet the configured limit", current_a, current_limit_a);
+        return -1;
     }
 
-    /* Make the correction step-wise so the loop converges smoothly without abruptly dropping heating. */
+    /* Input power is proportional to input current; tip power is proportional to Vout^2. */
+    const float current_buck_voltage = m_dac_output_voltage_compute(m_dac_voltage_v);
+    const float target_buck_voltage = (current_buck_voltage > 0.0f)
+        ? current_buck_voltage * sqrt(current_limit_a / current_a)
+        : 0.0f;
+
+    /* The DAC transfer function is inverse: increasing Vdac lowers buck output voltage. */
+    float target_vdac = 3.3f;
+    for (uint16_t i = 0; i < 256; i++) {
+        const float vdac = 3.3f * (i / 255.0f);
+        if (m_dac_output_voltage_compute(vdac) <= target_buck_voltage) {
+            target_vdac = vdac;
+            break;
+        }
+    }
+
+    if (target_vdac < m_dac_voltage_v) {
+        target_vdac = m_dac_voltage_v;
+    }
+
+    /* Limit each correction step while moving in the direction that reduces buck output. */
     const float voltage_step_v = 0.05f;
-    if ((m_dac_voltage_v - target_vdac) > voltage_step_v) {
-        target_vdac = m_dac_voltage_v - voltage_step_v;
+    if ((target_vdac - m_dac_voltage_v) > voltage_step_v) {
+        target_vdac = m_dac_voltage_v + voltage_step_v;
     }
 
-    /* Update the DAC to the nearest safe value beneath the current limit. */
+    /* Update the DAC to reduce the buck output voltage. */
     int res = m_dac.output_voltage_set(target_vdac);
     if (res < 0) {
-        log_w("Failed to reduce buck voltage to %.2fV while current was %.2fA > %.2fA", target_vdac, current_a, current_limit_a);
+        log_w("Failed to increase DAC voltage to %.2fV while current was %.2fA > %.2fA", target_vdac, current_a, current_limit_a);
         return res;
     }
 
     m_dac_voltage_v = target_vdac;
-    log_w("Reduced buck voltage to %.2fV to stay below %.2fA (measured %.2fA)", target_vdac, current_limit_a, current_a);
+    log_w("Increased DAC voltage to %.2fV toward %.2fA current limit (measured %.2fA)", target_vdac, current_limit_a, current_a);
     return 0;
 }
 
@@ -489,8 +522,8 @@ int power_negotiated_power_limit_get(float &power_limit) {
         return -1;
     }
 
-    /* Return success */
-    power_limit = m_option_power_max_compute(contract);
+    /* Apply the configured current factor to the power budget before heating starts. */
+    power_limit = m_option_power_max_compute(contract) * m_heating_current_limit_factor_get();
     return 0;
 }
 
@@ -515,8 +548,7 @@ int power_negotiated_current_limit_get(float &current_limit_a) {
 
     /* Prefer the negotiated current limit when it is explicitly known. */
     if (contract.current_max > 0.0f) {
-        float current_limit_factor = CONFIG_TIP_CURRENT_LIMIT_FACTOR;
-        settings_heating_current_limit_factor_get(current_limit_factor);
+        const float current_limit_factor = m_heating_current_limit_factor_get();
         current_limit_a = contract.current_max * current_limit_factor;
         return 0;
     }
@@ -524,8 +556,7 @@ int power_negotiated_current_limit_get(float &current_limit_a) {
     /* Fall back to power/voltage when only a power contract is available. */
     if (contract.voltage_max > 0.0f) {
         const float negotiated_power_w = m_option_power_max_compute(contract);
-        float current_limit_factor = CONFIG_TIP_CURRENT_LIMIT_FACTOR;
-        settings_heating_current_limit_factor_get(current_limit_factor);
+        const float current_limit_factor = m_heating_current_limit_factor_get();
         current_limit_a = (negotiated_power_w / contract.voltage_max) * current_limit_factor;
         return 0;
     }
@@ -685,6 +716,15 @@ int power_tip_resistance_measure_cancel(void) {
 
     power_enabled_set(false);
     m_tip_resistance_measurement_state = TIP_RESISTANCE_MEASUREMENT_IDLE;
+    return m_adjust_buck(m_available_power_max_get());
+}
+
+int power_heating_current_limit_configure(void) {
+    const float factor = m_heating_current_limit_factor_get();
+    if (factor == m_buck_current_limit_factor_applied) {
+        return 0;
+    }
+
     return m_adjust_buck(m_available_power_max_get());
 }
 

@@ -65,6 +65,12 @@ int power_tip_resistance_get(float &resistance_ohms);
 int power_tip_resistance_offset_apply(void);
 
 /**
+ * @brief Applies a changed heating current limit to the buck converter.
+ * @return 0 on success, negative error code if buck regulation fails
+ */
+int power_heating_current_limit_configure(void);
+
+/**
  * @brief Advances the non-blocking tip resistance measurement.
  *
  * Call periodically while the measurement is active. The probe is skipped when
@@ -86,8 +92,8 @@ int power_tip_resistance_measure_task(void);
  */
 int power_tip_resistance_measure_cancel(void);
 
-/** * @brief Reduce the DC-DC output voltage step-by-step to keep the measured current
- * below the configured USB safety limit.
+/** * @brief Reduce the DC-DC output voltage step-by-step to approach the configured
+ * USB current limit.
  *
  * This is used by the heater control loop to approach the 80% limit smoothly
  * instead of dropping the heating phase completely.

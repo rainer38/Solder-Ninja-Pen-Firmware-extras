@@ -22,7 +22,7 @@
 #define CONFIG_TIP_READ_TIMEOUT 2000      //!< Maximum time after which no valid temperature readins will lead to considering the tip is disconnected (in milliseconds).
 #define CONFIG_TIP_SOFT_START_DURATION 0    //!< Default duration of the soft-start current ramp (in milliseconds).
 #define CONFIG_TIP_CURRENT_LIMIT_FACTOR 1.0f //!< Default factor applied to negotiated USB current limits.
-#define CONFIG_TIP_SHUNT_MILLIOHMS 16.0f  //!< Actual shunt resistor value used on the INA219 current-sense path (16 mΩ).
+#define CONFIG_TIP_SHUNT_MILLIOHMS 10.0f  //!< Actual shunt resistor value used on the INA219 current-sense path (10 mΩ).
 #define CONFIG_TIP_BUCK_EFFICIENCY 0.80f  //!< Assumed DC-DC converter efficiency.
 #define CONFIG_TIP_RESISTANCE_DEFAULT_OHMS 2.1f  //!< Default tip resistance used when measurement is unavailable or invalid.
 #define CONFIG_TIP_RESISTANCE_ALTERNATIVE_OHMS 1.6f  //!< Alternative nominal tip resistance selected by the resistance measurement.

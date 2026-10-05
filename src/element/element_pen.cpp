@@ -376,6 +376,12 @@ int element_task(void) {
                 break;
             }
 
+            res = power_heating_current_limit_configure();
+            if (res < 0) {
+                log_w("Failed to apply heating current limit before heating");
+                break;
+            }
+
             /* Ask usb power negotiator how much power we are allowed to draw.
              * The negotiated contract is stable while the tip is heating, so the current
              * limit is evaluated once per cycle and then reused below. */
@@ -390,15 +396,14 @@ int element_task(void) {
             }
             m_cycle_current_limit_a = current_limit_a;
 
-            /* Read actual current and trim the DC-DC output voltage upward or downward
-             * so the heater stays near the 80% USB limit instead of skipping the phase. */
+            /* Read actual current and trim the DC-DC output voltage if it exceeds the configured limit. */
             float current_a = 0.0f;
             res = power_current_get(current_a);
             if (res < 0) {
                 break;
             }
             if (current_a > m_cycle_current_limit_a) {
-                log_w("USB current limit exceeded: %.2fA > %.2fA, reducing DAC output", current_a, m_cycle_current_limit_a);
+                log_w("USB current limit exceeded: %.2fA > %.2fA, adjusting buck output", current_a, m_cycle_current_limit_a);
                 res = power_heating_current_limit_apply(current_a, m_cycle_current_limit_a);
                 if (res < 0) {
                     break;
@@ -484,7 +489,7 @@ int element_task(void) {
             }
             float soft_start_current_limit_a = m_soft_start_current_limit_get(m_cycle_current_limit_a);
             if (current_a > soft_start_current_limit_a) {
-                log_w("USB current limit exceeded while heating: %.2fA > %.2fA, reducing DAC output", current_a, soft_start_current_limit_a);
+                log_w("USB current limit exceeded while heating: %.2fA > %.2fA, adjusting buck output", current_a, soft_start_current_limit_a);
                 res = power_heating_current_limit_apply(current_a, soft_start_current_limit_a);
                 if (res < 0) {
                     power_enabled_set(false);
