@@ -1501,7 +1501,7 @@ int settings_heating_current_limit_factor_set(const float factor) {
 
 /**
  * @brief Get the heating soft-start duration
- * @param[out] duration_ms Duration in milliseconds from 0 to 1000
+ * @param[out] duration_ms Duration in milliseconds from 100 to 1000
  * @return 1 if found, 0 if not found or invalid
  */
 int settings_heating_soft_start_duration_get(uint32_t &duration_ms) {
@@ -1510,7 +1510,7 @@ int settings_heating_soft_start_duration_get(uint32_t &duration_ms) {
     }
 
     uint32_t stored_duration_ms = m_doc["preferences"]["heating"]["soft_start_duration_ms"];
-    if ((stored_duration_ms > 1000) || ((stored_duration_ms % 100) != 0)) {
+    if ((stored_duration_ms < 100) || (stored_duration_ms > 1000) || ((stored_duration_ms % 100) != 0)) {
         return 0;
     }
 
@@ -1520,11 +1520,11 @@ int settings_heating_soft_start_duration_get(uint32_t &duration_ms) {
 
 /**
  * @brief Set the heating soft-start duration
- * @param[in] duration_ms Duration in milliseconds from 0 to 1000 in 100 ms increments
+ * @param[in] duration_ms Duration in milliseconds from 100 to 1000 in 100 ms increments
  * @return 0 on success, negative error code on failure
  */
 int settings_heating_soft_start_duration_set(const uint32_t duration_ms) {
-    if ((duration_ms > 1000) || ((duration_ms % 100) != 0)) {
+    if ((duration_ms < 100) || (duration_ms > 1000) || ((duration_ms % 100) != 0)) {
         return -EINVAL;
     }
 

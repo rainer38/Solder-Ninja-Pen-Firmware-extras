@@ -1300,7 +1300,7 @@ int interface_task(void) {
             /* Handle buttons */
             switch (buttons_event_get()) {
                 case BUTTONS_EVENT_LEFT_SHORT: {
-                    if (duration_ms >= 100) {
+                    if (duration_ms > 100) {
                         settings_heating_soft_start_duration_set(duration_ms - 100);
                     }
                     break;
